@@ -1,0 +1,5 @@
+*_.csv
+build/
+*.old
+*_.md
+managed_components/
