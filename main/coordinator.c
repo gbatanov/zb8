@@ -125,21 +125,24 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
 
 void zb_stack_init(void)
 {
-    /* Initialize Zigbee stack with default configuration */
+    // Initialize Zigbee stack with default configuration 
     esp_zigbee_config_t zb_config = ESP_ZIGBEE_DEFAULT_CONFIG();
     esp_zigbee_init(&zb_config);
 
-    /* Set default allowed network channels */
+    // Set default allowed network channels 
     ESP_ERROR_CHECK(ezb_set_channel_mask(ESP_ZIGBEE_ALL_CHANNELS_MASK));
 
-    /* Set default network type */
+    // Set default network type
     ezb_aps_secur_enable_distributed_security(true);
 
-    /* Register application signal handler */
+    // Здесь же вызывается ezb_config_memory(&mem_cfg) и регистрация эндпоинта
+    coordinator_register_endpoint();
+    
+    // Register application signal handler 
     ESP_ERROR_CHECK(ezb_app_signal_add_handler(zb_app_signal_handler));
 
-    /* Enable CLI managed ep_list */
-    esp_zb_console_manage_ep_list(NULL);
+    // Enable CLI managed ep_list 
+    //esp_zb_console_manage_ep_list(NULL);
 }
 
 static void zb_stack_main_task(void *pvParameters)
@@ -162,8 +165,8 @@ static void zb_stack_main_task(void *pvParameters)
 void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(esp_zb_console_init());
+//    ESP_ERROR_CHECK(esp_zb_console_init());
     xTaskCreate(zb_stack_main_task, "Zigbee_main", 4096, NULL, 5, NULL);
-    ESP_LOGI(TAG, "Start ESP Zigbee Console");
-    ESP_ERROR_CHECK(esp_zb_console_start());
+//    ESP_LOGI(TAG, "Start ESP Zigbee Console");
+//   ESP_ERROR_CHECK(esp_zb_console_start());
 }

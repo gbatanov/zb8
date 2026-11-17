@@ -182,3 +182,23 @@ idf.py -p /dev/tty.usbmodem58970173491 monitor
 ```
 CTRL+]
 ```
+
+
+
+## Как связать ваш существующий код (под ZNP) с ESP32-H2
+
+В протоколе TI ZNP ваш код на ПК работает через ограниченное число базовых примитивов. Чтобы перевести ваше ПО на ESP32-H2 с минимальными правками, достаточно сделать на ESP32-H2 эмуляцию именно этих 5–6 команд (в вашем бинарном формате по /dev/ttyACM0):
+
+Команда в ZNP (CC2652)	Что делает ваше ПО	Аналог в прошивке ESP32-H2 (SDK v2.x)
+ZDO_MGMT_PERMIT_JOIN_REQ
+	Открывает сеть для добавления датчиков	ezb_bdb_open_network(duration)
+ZDO_ACTIVE_EP_REQ + ZDO_ACTIVE_EP_RSP
+	Запрашивает список эндпоинтов	ezb_zdo_active_ep_req() + отправка ответа в USB
+ZDO_SIMPLE_DESC_REQ + ZDO_SIMPLE_DESC_RSP
+	Запрашивает кластеры эндпоинта	ezb_zdo_simple_desc_req() + отправка ответа в USB
+ZDO_BIND_REQ + ZDO_BIND_RSP
+	Привязывает кластер датчика к координатору	ezb_zdo_bind_req() + отправка ответа в USB
+AF_DATA_REQUEST
+	Отправляет сырой ZCL-пакет устройству (включить реле, прочитать атрибут)	ezb_aps_data_req() или ezb_zcl_custom_cluster_cmd_req()
+AF_INCOMING_MSG
+	Получает любой входящий ZCL-пакет от датчика	Перехват через zb_action_handler / raw_cmd_handler и отправка в USB
