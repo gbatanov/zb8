@@ -6,4 +6,4 @@ list(PREPEND SDKCONFIG_DEFAULTS  "sdkconfig.defaults")
 
 set(COMPONENTS main)
 
-project(all_device_types_app)
+project(zb8)
