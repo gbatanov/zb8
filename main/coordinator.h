@@ -1,23 +1,9 @@
-/*
- * SPDX-FileCopyrightText: 2024-2026 Espressif Systems (Shanghai) CO LTD
- *
- * SPDX-License-Identifier: LicenseRef-Included
- *
- * Zigbee All Device Types App Example
- *
- * This example code is in the Public Domain (or CC0 licensed, at your option.)
- *
- * Unless required by applicable law or agreed to in writing, this
- * software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
- * CONDITIONS OF ANY KIND, either express or implied.
- */
-
 #pragma once
 
 #include "esp_zigbee.h"
 #include "esp_zigbee_console.h"
 
-#define MAX_CHILDREN                    10          /* the max amount of connected devices */
+#define MAX_CHILDREN                    32          /* the max amount of connected devices */
 #define INSTALLCODE_POLICY_ENABLE       false       /* enable the install code policy for security */
 
 #define ESP_ZIGBEE_STORAGE_PARTITION_NAME "nvs"
@@ -25,7 +11,7 @@
 
 #define ESP_ZIGBEE_ZR_CONFIG()                                          \
     {                                                                   \
-        .device_type = EZB_NWK_DEVICE_TYPE_ROUTER,                      \
+        .device_type = EZB_NWK_DEVICE_TYPE_COORDINATOR,                      \
         .install_code_policy = INSTALLCODE_POLICY_ENABLE,               \
         .zczr_config = {                                                \
             .max_children = MAX_CHILDREN,                               \

@@ -1,4 +1,10 @@
 dependencies:
+  esp-zigbee-console:
+    dependencies: []
+    source:
+      path: components/esp-zigbee-console
+      type: local
+    version: 1.0.0
   espressif/esp-zigbee-lib:
     component_hash: a77267ebb510b80f568d96ec8d00082dd7a0937c3dd5b094555071d7ce8f51c5
     dependencies:
@@ -14,8 +20,9 @@ dependencies:
       type: idf
     version: 6.0.3
 direct_dependencies:
+- esp-zigbee-console
 - espressif/esp-zigbee-lib
 - idf
-manifest_hash: d8dd5127b2e94465ecefeab6b192cf8876cbeeee4fda9f9c11df6a97f9d24bf4
-target: esp32
+manifest_hash: 38d5f93dfcabd0397fa4e24e8c70e9c170f43ee0d9801b6ac704482ef43c3b96
+target: esp32h2
 version: 3.0.0

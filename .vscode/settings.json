@@ -1,5 +1,19 @@
 {
     "idf.currentSetup": "/Users/gbatanov/work/esp-idf/v6.0/esp-idf",
     "idf.port": "/dev/tty.usbmodem14801",
-    "idf.monitorPort": "/dev/tty.usbmodem58970173491"
+    "idf.monitorPort": "/dev/tty.usbmodem58970173491",
+    "idf.openOcdConfigs": [
+        "board/esp32h2-builtin.cfg"
+    ],
+    "idf.customExtraVars": {
+        "OPENOCD_USB_ADAPTER_LOCATION": "20-8",
+        "IDF_TARGET": "esp32h2"
+    },
+    "clangd.path": "/Users/gbatanov/.espressif/tools/esp-clang/esp-20.1.1_20250829/esp-clang/bin/clangd",
+    "clangd.arguments": [
+      "--background-index",
+      "--query-driver=**",
+      "--compile-commands-dir=/Users/gbatanov/work/esp32/zb8/build"
+    ],
+    "idf.flashType": "UART"
 }

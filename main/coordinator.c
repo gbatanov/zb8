@@ -1,23 +1,9 @@
-/*
- * SPDX-FileCopyrightText: 2024-2026 Espressif Systems (Shanghai) CO LTD
- *
- * SPDX-License-Identifier: LicenseRef-Included
- *
- * Zigbee All Device Types App Example
- *
- * This example code is in the Public Domain (or CC0 licensed, at your option.)
- *
- * Unless required by applicable law or agreed to in writing, this
- * software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
- * CONDITIONS OF ANY KIND, either express or implied.
- */
-
-#include "all_device_types_app.h"
+#include "coordinator.h"
 
 #include "esp_log.h"
 #include "nvs_flash.h"
 
-static const char *TAG = "ESP_ZB_CONSOLE_APP";
+static const char *TAG = "GSB_ZB8";
 
 static void log_nwk_info(const char *status_string)
 {
