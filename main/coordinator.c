@@ -5,16 +5,50 @@
 #include "ezbee/secur.h"
 #include "ezbee/bdb.h"
 #include "ezbee/af.h"
+#include "ezbee/zcl.h"
+#include "ezbee/nwk.h"
+#include "ezbee/zdo/zdo_dev_srv_disc.h"
+#include "ezbee/zdo/zdo_bind_mgmt.h"
+
 #include "coordinator.h"
 
 const char *TAG = "GSB_ZB8";
 
+// Контекст последнего подключаемого устройства
+
+joining_device_ctx_t s_joining_dev = {0};
+
+/// @brief /
+/// @param status_string
 static void log_nwk_info(const char *status_string)
 {
     ezb_extaddr_t extpanid;
     ezb_get_extended_panid(&extpanid);
     ESP_LOGI(TAG, "%s (Extended PAN ID: 0x%016llx, PAN ID: 0x%04hx, Channel:%d, Short Address: 0x%04hx)",
              status_string, extpanid.u64, ezb_get_panid(), ezb_get_current_channel(), ezb_get_short_address());
+}
+
+static void zb_action_handler(ezb_zcl_core_action_callback_id_t callback_id, void *message)
+{
+    ESP_LOGI(TAG, ">>> ZCL ACTION: cb_id=0x%x", callback_id);
+
+    switch (callback_id)
+    {
+    case EZB_ZCL_CORE_READ_ATTR_RSP_CB_ID:
+        ESP_LOGI(TAG, ">>> ПОЛУЧЕН ОТВЕТ ZCL Read Attributes от устройства!");
+        break;
+
+    case EZB_ZCL_CORE_REPORT_ATTR_CB_ID:
+        ESP_LOGI(TAG, ">>> ПОЛУЧЕН ОТЧЕТ ZCL Report Attributes!");
+        break;
+
+    case EZB_ZCL_CORE_DEFAULT_RSP_CB_ID:
+        ESP_LOGI(TAG, ">>> ПОЛУЧЕН Default Response от устройства!");
+        break;
+
+    default:
+        break;
+    }
 }
 
 static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
@@ -40,16 +74,26 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
     {
     case EZB_ZDO_SIGNAL_SKIP_STARTUP:
         ESP_LOGI(TAG, "Initialize Zigbee stack");
+        setup_coord_trust_center_addr();
+
+#ifndef USE_CONSOLE
         ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_INITIALIZATION);
+#endif
         break;
     case EZB_BDB_SIGNAL_DEVICE_FIRST_START:
+#ifndef USE_CONSOLE
         if (signal_params.bdb->status == EZB_ERR_NONE)
         {
             ESP_LOGI(TAG, "Первый старт (Flash чистый), формируем новую сеть...");
             ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_FORMATION);
         }
         break;
+#endif
+        ESP_LOGI(TAG, "Device first start");
+        /* fall through */
+
     case EZB_BDB_SIGNAL_DEVICE_REBOOT:
+#ifndef USE_CONSOLE
         if (signal_params.bdb->status == EZB_ERR_NONE)
         {
             ESP_LOGI(TAG, "Сеть восстановлена из памяти (Канал: %d), открываем на 120с",
@@ -61,12 +105,26 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
             ESP_LOGE(TAG, "%s failed with status: %d, please retry", ezb_app_signal_to_string(signal_type),
                      signal_params.bdb->status);
         }
+#else
+        if (signal_params.bdb->status == EZB_BDB_STATUS_SUCCESS)
+        {
+            ESP_LOGI(TAG, "Device started up in%s factory-reset mode", ezb_bdb_is_factory_new() ? "" : " non");
+        }
+        else
+        {
+            ESP_LOGE(TAG, "%s failed with status: %d, please retry", ezb_app_signal_to_string(signal_type),
+                     signal_params.bdb->status);
+        }
+#endif
         break;
     case EZB_BDB_SIGNAL_FORMATION:
         if (signal_params.bdb->status == EZB_BDB_STATUS_SUCCESS)
         {
             log_nwk_info("Formed network successfully");
+            setup_coord_trust_center_addr();
+#ifndef USE_CONSOLE
             ezb_bdb_open_network(120);
+#endif
         }
         else
         {
@@ -90,7 +148,21 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
         ESP_LOGI(TAG, "Zigbee Node (0x%04hx) is leaving network", signal_params.leave_ind->short_addr);
         break;
     case EZB_ZDO_SIGNAL_DEVICE_ANNCE:
-        ESP_LOGI(TAG, "New device commissioned or rejoined (short: 0x%04hx)", signal_params.dev_annce->short_addr);
+        if (s_joining_dev.short_addr != 0 && s_joining_dev.short_addr != 0xFFFF)
+        {
+            ESP_LOGI(TAG, "Device annce: short=0x%04x", s_joining_dev.short_addr);
+
+            ezb_zdo_active_ep_req_t req = {
+                .dst_nwk_addr = s_joining_dev.short_addr,
+                .field = {
+                    .nwk_addr_of_interest = s_joining_dev.short_addr,
+                },
+                .cb = zdo_active_ep_cb,
+                .user_ctx = NULL,
+            };
+            ezb_err_t err = ezb_zdo_active_ep_req(&req);
+            ESP_LOGI(TAG, "Sent Active EP Req to 0x%04x, err=0x%x", s_joining_dev.short_addr, err);
+        }
         break;
     case EZB_NWK_SIGNAL_PERMIT_JOIN_STATUS:
         if (signal_params.permit_join->duration)
@@ -133,8 +205,9 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
         ESP_LOGI(TAG, "Device(0x%04x:0x%016llx) update: parent(0x%04x) status(%d) tc_action(%d)",
                  signal_params.dev_upd->short_addr, signal_params.dev_upd->device_addr.u64,
                  signal_params.dev_upd->parent_short, signal_params.dev_upd->status, signal_params.dev_upd->tc_action);
-        if (signal_params.dev_upd->status == 1 && signal_params.dev_upd->tc_action == 0)
-            test_send_active_ep(signal_params.dev_upd->short_addr);
+        s_joining_dev.short_addr = signal_params.dev_upd->short_addr;                                     // переменная, из которой печатается 0xd0b4
+        memcpy(&s_joining_dev.ieee_addr, &signal_params.dev_upd->device_addr.u64, sizeof(ezb_extaddr_t)); // откуда печатается 0x54ef4410005b2639
+
         break;
     case EZB_ZDO_SIGNAL_DEVICE_AUTHORIZED:
         ESP_LOGI(TAG, "Device(0x%04x:0x%016llx) authorized: status(%d) type (%d)",
@@ -160,6 +233,7 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
     return false;
 }
 
+#ifndef USE_CONSOLE
 void zb_stack_init(void)
 {
     // Initialize Zigbee stack with default configuration
@@ -187,7 +261,7 @@ void zb_stack_init(void)
 
     ezb_secur_tcpol_set_allow_rejoins_with_well_known_key(true);
     ezb_secur_set_tclk_exchange_required(false);
- 
+
     // Set default allowed network channels
     ///    ESP_ERROR_CHECK(ezb_set_channel_mask(ESP_ZIGBEE_ALL_CHANNELS_MASK));
     // Also set the channels for BDB commissioning
@@ -231,3 +305,83 @@ void app_main(void)
     //    ESP_LOGI(TAG, "Start ESP Zigbee Console");
     //   ESP_ERROR_CHECK(esp_zb_console_start());
 }
+#endif
+#ifdef USE_CONSOLE
+void zb_stack_init(void)
+{
+
+    /* Initialize Zigbee stack with default configuration */
+    esp_zigbee_config_t zb_config = ESP_ZIGBEE_DEFAULT_CONFIG();
+    esp_zigbee_init(&zb_config);
+
+    ///
+    // 1. Задаём роль координатора (вместо консольной команды: role zc)
+    ezb_nwk_set_device_type(EZB_NWK_DEVICE_TYPE_COORDINATOR);
+    // 2. Устанавливаем 15 канал (вместо консольной команды: channel 15)
+    uint32_t channel_mask = (1U << 15);
+    ezb_bdb_set_primary_channel_set(channel_mask);
+    ezb_bdb_set_secondary_channel_set(0);
+
+    static const uint8_t zigbee_alliance09_key[16] = {
+        0x5A, 0x69, 0x67, 0x42, 0x65, 0x65, 0x41, 0x6C,
+        0x6C, 0x69, 0x61, 0x6E, 0x63, 0x65, 0x30, 0x39};
+    ezb_secur_set_global_link_key(zigbee_alliance09_key);
+
+    ezb_af_node_desc_set_manuf_code(0x0115F); // Код производителя Lumi/Aqara 0x115
+    ezb_bdb_set_router_rejoin_required(true);
+    ezb_secur_set_kn_method_enabled(EZB_SECUR_KN_METHOD_STATIC_REQUEST_KEY, true);
+    ezb_secur_set_tclk_exchange_required(true);
+    ezb_secur_tcpol_set_allow_rejoins_with_well_known_key(true);
+    ezb_secur_set_kn_method_enabled(EZB_SECUR_KN_METHOD_ECSPEKE_CURVE25519_AESMMO, true);
+    ezb_secur_set_kn_method_enabled(EZB_SECUR_KN_METHOD_ECSPEKE_CURVE25519_SHA256, true);
+
+    ///
+
+    /* Set default allowed network channels */
+    ESP_ERROR_CHECK(ezb_set_channel_mask(ESP_ZIGBEE_ALL_CHANNELS_MASK));
+
+    /* Set default network type */
+    ezb_aps_secur_enable_distributed_security(true);
+
+    /* Register application signal handler */
+    ESP_ERROR_CHECK(ezb_app_signal_add_handler(zb_app_signal_handler));
+
+    /// Регистрация обработчика всех входящих ZCL-событий и ответов
+    setup_coord_trust_center_addr();
+    ezb_zcl_core_action_handler_register(zb_action_handler);
+    // Здесь вызывается ezb_config_memory(&mem_cfg) и регистрация эндпоинта
+    coordinator_register_endpoint();
+    ESP_ERROR_CHECK(ezb_dev_start(true));
+    ///
+
+    /* Enable CLI managed ep_list */
+    esp_zb_console_manage_ep_list(NULL);
+}
+
+static void zb_stack_main_task(void *pvParameters)
+{
+    zb_stack_init();
+
+    /* Do not call `esp_zb_start()`.
+     *
+     * We want the timing of starting the stack to be managed by CLI,
+     * so that we have a chance to do configurations on the stack.
+     *
+     */
+
+    esp_zigbee_launch_mainloop();
+
+    esp_zigbee_deinit();
+    vTaskDelete(NULL);
+}
+
+void app_main(void)
+{
+    ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_ERROR_CHECK(esp_zb_console_init());
+    xTaskCreate(zb_stack_main_task, "Zigbee_main", 4096, NULL, 5, NULL);
+    ESP_LOGI(TAG, "Start ESP Zigbee Console");
+    ESP_ERROR_CHECK(esp_zb_console_start());
+}
+
+#endif

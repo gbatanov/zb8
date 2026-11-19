@@ -2883,6 +2883,15 @@ CONFIG_VFS_INITIALIZE_DEV_NULL=y
 # end of Virtual file system
 
 #
+# Zigbee Console
+#
+# default:
+CONFIG_ZB_CONSOLE_ENABLED=y
+# default:
+CONFIG_ZB_CONSOLE_MAX_LINE_LENGTH=0
+# end of Zigbee Console
+
+#
 # Zigbee
 #
 CONFIG_ZB_ENABLED=y
@@ -2898,8 +2907,7 @@ CONFIG_ZB_ZCZR=y
 CONFIG_ZB_RADIO_NATIVE=y
 # default:
 # CONFIG_ZB_RADIO_SPINEL_UART is not set
-# default:
-# CONFIG_ZB_DEBUG_MODE is not set
+CONFIG_ZB_DEBUG_MODE=y
 # end of Zigbee
 # end of Component config
 

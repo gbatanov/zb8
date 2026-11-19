@@ -1,8 +1,24 @@
 #pragma once
 
+#ifndef USE_CONSOLE
+#define USE_CONSOLE
+#endif
 #include "esp_zigbee.h"
-// #include "esp_zigbee_console.h"
+#include "ezbee/nwk.h"
+#include "ezbee/zdo/zdo_dev_srv_disc.h"
+#include "ezbee/zdo/zdo_bind_mgmt.h"
 
+typedef     struct
+{
+    uint16_t short_addr;
+    ezb_extaddr_t ieee_addr;
+} joining_device_ctx_t;
+
+
+
+#ifdef USE_CONSOLE
+#include "esp_zigbee_console.h"
+#endif
 #define MAX_CHILDREN 32                 // the max amount of connected devices
 #define INSTALLCODE_POLICY_ENABLE false // enable the install code policy for security
 
@@ -41,8 +57,16 @@
         .platform_config = ESP_ZIGBEE_DEFAULT_PLATFORM_CONFIG(), \
         .device_config = ESP_ZIGBEE_ZR_CONFIG(),                 \
     }
-
-void coordinator_register_endpoint(void);
+#ifndef USE_CONSOLE
 void permit_join(uint8_t duration_sec, bool with_mutex );
 void permit_join_via_router(uint16_t router_short_addr, uint8_t duration_sec);
 void test_send_active_ep(uint16_t short_addr);
+#endif
+void coordinator_register_endpoint(void);
+void send_zcl_read_basic(uint16_t short_addr, uint8_t target_ep);
+void zdo_active_ep_cb(const ezb_zdo_active_ep_req_result_t *result, void *user_ctx);
+void zdo_bind_cb(const ezb_zdp_bind_req_result_t *result, void *user_ctx);
+void send_bind_request(uint16_t dst_short_addr, const ezb_extaddr_t *dev_ieee,
+                              uint8_t src_ep, uint16_t cluster_id);
+
+void setup_coord_trust_center_addr(void);
