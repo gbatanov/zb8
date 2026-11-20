@@ -4,3 +4,4 @@ build/
 *_.md
 managed_components/
 .clangd
+*.code-workspace

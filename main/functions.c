@@ -17,7 +17,7 @@
 #include "coordinator.h"
 
 extern const char *TAG;
-extern joining_device_ctx_t s_joining_dev;
+///extern joining_device_ctx_t s_joining_dev;
 
 // Открыть сеть на duration_sec секунд (вызывать под блокировкой, если из другой задачи FreeRTOS)
 void permit_join(uint8_t duration_sec, bool with_mutex)
@@ -112,8 +112,10 @@ void zdo_bind_cb(const ezb_zdp_bind_req_result_t *result, void *user_ctx)
 }
 
 // Вспомогательная функция отправки Bind Request (аналог кадров 331 и 337 из эталона)
-void send_bind_request(uint16_t dst_short_addr, const ezb_extaddr_t *dev_ieee,
-                       uint8_t src_ep, uint16_t cluster_id)
+void send_bind_request(uint16_t dst_short_addr,
+                       const ezb_extaddr_t *dev_ieee,
+                       uint8_t src_ep,
+                       uint16_t cluster_id)
 {
     ezb_extaddr_t coord_ieee = {0};
     // Получаем собственный IEEE-адрес координатора (0x0000)
@@ -144,28 +146,38 @@ void zdo_active_ep_cb(const ezb_zdo_active_ep_req_result_t *result, void *user_c
 {
     uint8_t target_ep = 1;
 
-    if (!result || !result->rsp)
+    joining_device_ctx_t *dev = (joining_device_ctx_t *)user_ctx;
+    if (!dev)
     {
-        ESP_LOGW(TAG, "Active EP request failed or timeout");
         return;
     }
-    ESP_LOGI(TAG, "Active EP response from 0x%04x: count=%d",
-             s_joining_dev.short_addr, result->rsp->active_ep_count);
 
-    for (uint8_t i = 0; i < result->rsp->active_ep_count; i++)
+    if (result && result->rsp)
     {
-        ESP_LOGI(TAG, "  -> EP[%d] = %d", i, result->rsp->active_ep_list[i]);
-        if (i == 0)
-        {
-            target_ep = result->rsp->active_ep_list[0];
-        }
-    }
-    // 1. Сюда перенесите ваш вызов ZCL Read Basic (0x0004, 0x0005) на s_joining_dev.short_addr, target_ep
-    send_zcl_read_basic(s_joining_dev.short_addr, target_ep);
+        ESP_LOGI(TAG, "Active EP response from 0x%04x: count=%d",
+                 dev->short_addr, result->rsp->active_ep_count);
 
-    // 2. Отправляем два Bind Request точно как в эталонной трассе TI (кадры 331 и 337)
-    send_bind_request(s_joining_dev.short_addr, &s_joining_dev.ieee_addr, target_ep, 0x0006); // On/Off
-    send_bind_request(s_joining_dev.short_addr, &s_joining_dev.ieee_addr, target_ep, 0x0001); // Power Config
+        for (uint8_t i = 0; i < result->rsp->active_ep_count; i++)
+        {
+            uint8_t ep = *(result->rsp->active_ep_list + i);
+            ESP_LOGI(TAG, "  -> EP[%d] = %d", i, ep);
+            if (i == 0)
+            {
+                target_ep = ep;
+            }
+        }
+        // 1. Сюда перенесите ваш вызов ZCL Read Basic (0x0004, 0x0005) на s_joining_dev.short_addr, target_ep
+        send_zcl_read_basic( dev->short_addr, target_ep);
+
+        // 2. Отправляем два Bind Request точно как в эталонной трассе TI (кадры 331 и 337)
+        send_bind_request( dev->short_addr, &dev->ieee_addr, target_ep, 0x0006); // On/Off
+        send_bind_request( dev->short_addr, &dev->ieee_addr, target_ep, 0x0001); // Power Config
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Active EP request failed/timeout for 0x%04x", dev->short_addr);
+    }
+    free(dev);
 }
 
 void send_zcl_read_basic(uint16_t short_addr, uint8_t target_ep)

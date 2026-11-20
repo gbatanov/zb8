@@ -14,9 +14,8 @@
 
 const char *TAG = "GSB_ZB8";
 
-// Контекст последнего подключаемого устройства
-
-joining_device_ctx_t s_joining_dev = {0};
+/// Контекст последнего подключаемого устройства
+/// joining_device_ctx_t s_joining_dev = {0};
 
 /// @brief /
 /// @param status_string
@@ -109,6 +108,7 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
         {
             log_nwk_info("Formed network successfully");
             setup_coord_trust_center_addr();
+            ezb_bdb_open_network(120);
         }
         else
         {
@@ -132,20 +132,35 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
         ESP_LOGI(TAG, "Zigbee Node (0x%04hx) is leaving network", signal_params.leave_ind->short_addr);
         break;
     case EZB_ZDO_SIGNAL_DEVICE_ANNCE:
-        if (s_joining_dev.short_addr != 0 && s_joining_dev.short_addr != 0xFFFF)
-        {
-            ESP_LOGI(TAG, "Device annce: short=0x%04x", s_joining_dev.short_addr);
+        uint16_t short_addr = signal_params.dev_annce->short_addr;
+        ESP_LOGI(TAG, "Device annce: short=0x%04x", short_addr);
 
-            ezb_zdo_active_ep_req_t req = {
-                .dst_nwk_addr = s_joining_dev.short_addr,
-                .field = {
-                    .nwk_addr_of_interest = s_joining_dev.short_addr,
-                },
-                .cb = zdo_active_ep_cb,
-                .user_ctx = NULL,
-            };
-            ezb_err_t err = ezb_zdo_active_ep_req(&req);
-            ESP_LOGI(TAG, "Sent Active EP Req to 0x%04x, err=0x%x", s_joining_dev.short_addr, err);
+        joining_device_ctx_t *dev = (joining_device_ctx_t *)calloc(1, sizeof(joining_device_ctx_t));
+        if (!dev)
+        {
+            ESP_LOGE(TAG, "No memory for joining device context");
+            break;
+        }
+
+        dev->short_addr = short_addr;
+        // Извлекаем IEEE-адрес по short_addr напрямую из таблицы стека (или копируем из signal_params.device_annce)
+        ezb_address_extended_by_short(short_addr, &dev->ieee_addr);
+
+        ezb_zdo_active_ep_req_t req = {
+            .dst_nwk_addr = short_addr,
+            .field = {
+                .nwk_addr_of_interest = short_addr,
+            },
+            .cb = zdo_active_ep_cb,
+            .user_ctx = dev,
+        };
+
+        ezb_err_t err = ezb_zdo_active_ep_req(&req);
+        ESP_LOGI(TAG, "Sent Active EP Req to 0x%04x, err=0x%x", short_addr, err);
+
+        if (err != EZB_ERR_NONE)
+        {
+            free(dev);
         }
         break;
     case EZB_NWK_SIGNAL_PERMIT_JOIN_STATUS:
@@ -189,14 +204,18 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
         ESP_LOGI(TAG, "Device(0x%04x:0x%016llx) update: parent(0x%04x) status(%d) tc_action(%d)",
                  signal_params.dev_upd->short_addr, signal_params.dev_upd->device_addr.u64,
                  signal_params.dev_upd->parent_short, signal_params.dev_upd->status, signal_params.dev_upd->tc_action);
-        s_joining_dev.short_addr = signal_params.dev_upd->short_addr;                                     // переменная, из которой печатается 0xd0b4
-        memcpy(&s_joining_dev.ieee_addr, &signal_params.dev_upd->device_addr.u64, sizeof(ezb_extaddr_t)); // откуда печатается 0x54ef4410005b2639
 
         break;
     case EZB_ZDO_SIGNAL_DEVICE_AUTHORIZED:
         ESP_LOGI(TAG, "Device(0x%04x:0x%016llx) authorized: status(%d) type (%d)",
                  signal_params.dev_auth->short_addr, signal_params.dev_auth->device_addr.u64,
                  signal_params.dev_auth->status, signal_params.dev_auth->type);
+        // Закрываем сеть ТОЛЬКО после полной ZB 3.0 авторизации (status == 0 и type == 1)
+        if (signal_params.dev_auth->status == 0 && signal_params.dev_auth->type == 1)
+        {
+            ESP_LOGI(TAG, "ZB 3.0 TCLK авторизация завершена, закрываем сеть");
+            ezb_bdb_open_network(0);
+        }
         break;
     case EZB_ZDO_SIGNAL_DEVICE_UNAVAILABLE:
         ESP_LOGI(TAG, "Device(0x%04x:0x%016llx) is unavailable",
@@ -216,7 +235,6 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
 
     return false;
 }
-
 
 void zb_stack_init(void)
 {
@@ -254,7 +272,10 @@ void zb_stack_init(void)
     ezb_af_node_desc_set_manuf_code(0x0115F); // Код производителя Lumi/Aqara 0x115
     ezb_bdb_set_router_rejoin_required(true);
     ezb_secur_set_kn_method_enabled(EZB_SECUR_KN_METHOD_STATIC_REQUEST_KEY, true);
-    ezb_secur_set_tclk_exchange_required(true);
+    /// ezb_secur_set_tclk_exchange_required(true);
+    ///  Отключаем принудительный кик по 15-секундному таймеру BDB
+    ezb_secur_set_tclk_exchange_required(false);
+
     ezb_secur_tcpol_set_allow_rejoins_with_well_known_key(true);
     ezb_secur_set_kn_method_enabled(EZB_SECUR_KN_METHOD_ECSPEKE_CURVE25519_AESMMO, true);
     ezb_secur_set_kn_method_enabled(EZB_SECUR_KN_METHOD_ECSPEKE_CURVE25519_SHA256, true);
@@ -282,7 +303,7 @@ static void zb_stack_main_task(void *pvParameters)
     esp_zigbee_start(false);
 
     ESP_ERROR_CHECK(ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_INITIALIZATION));
-   ///  ESP_ERROR_CHECK(ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_FORMATION));
+    ///  ESP_ERROR_CHECK(ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_FORMATION));
 
     ESP_ERROR_CHECK(esp_zigbee_launch_mainloop());
 
