@@ -1,8 +1,5 @@
 #pragma once
 
-#ifndef USE_CONSOLE
-//#define USE_CONSOLE
-#endif
 #include "esp_zigbee.h"
 #include "ezbee/nwk.h"
 #include "ezbee/zdo/zdo_dev_srv_disc.h"
@@ -16,9 +13,6 @@ typedef     struct
 
 
 
-#ifdef USE_CONSOLE
-#include "esp_zigbee_console.h"
-#endif
 #define MAX_CHILDREN 32                 // the max amount of connected devices
 #define INSTALLCODE_POLICY_ENABLE false // enable the install code policy for security
 
@@ -57,11 +51,11 @@ typedef     struct
         .platform_config = ESP_ZIGBEE_DEFAULT_PLATFORM_CONFIG(), \
         .device_config = ESP_ZIGBEE_ZR_CONFIG(),                 \
     }
-#ifndef USE_CONSOLE
+
 void permit_join(uint8_t duration_sec, bool with_mutex );
 void permit_join_via_router(uint16_t router_short_addr, uint8_t duration_sec);
 void test_send_active_ep(uint16_t short_addr);
-#endif
+
 void coordinator_register_endpoint(void);
 void send_zcl_read_basic(uint16_t short_addr, uint8_t target_ep);
 void zdo_active_ep_cb(const ezb_zdo_active_ep_req_result_t *result, void *user_ctx);
