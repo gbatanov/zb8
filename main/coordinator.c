@@ -73,7 +73,7 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
     switch (signal_type)
     {
     case EZB_ZDO_SIGNAL_SKIP_STARTUP:
-        ESP_LOGI(TAG, "Initialize Zigbee stack");
+        ESP_LOGI(TAG, "Initialize Zigbee stack:: bdb_comm start init");
         setup_coord_trust_center_addr();
 
 #ifndef USE_CONSOLE
@@ -84,7 +84,7 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
 #ifndef USE_CONSOLE
         if (signal_params.bdb->status == EZB_ERR_NONE)
         {
-            ESP_LOGI(TAG, "Первый старт (Flash чистый), формируем новую сеть...");
+            ESP_LOGI(TAG, "Первый старт (Flash чистый), формируем новую сеть...:: bdb_comm start form");
             ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_FORMATION);
         }
         break;
@@ -96,8 +96,8 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
 #ifndef USE_CONSOLE
         if (signal_params.bdb->status == EZB_ERR_NONE)
         {
-            ESP_LOGI(TAG, "Сеть восстановлена из памяти (Канал: %d), открываем на 120с",
-                     ezb_nwk_get_current_channel());
+            ESP_LOGI(TAG, "Device started up in%s factory-reset mode", ezb_bdb_is_factory_new() ? "" : " non");
+            ESP_LOGI(TAG, "Сеть восстановлена из памяти (Канал: %d), открываем на 120с", ezb_nwk_get_current_channel());
             ezb_bdb_open_network(120);
         }
         else
@@ -236,9 +236,6 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
 #ifndef USE_CONSOLE
 void zb_stack_init(void)
 {
-    // Initialize Zigbee stack with default configuration
-    ///    esp_zigbee_config_t zb_config = ESP_ZIGBEE_DEFAULT_CONFIG();
-    ///  esp_zigbee_init(&zb_config);
 
     ESP_LOGI(TAG, "1. Старт задачи Zigbee...");
 
@@ -259,38 +256,51 @@ void zb_stack_init(void)
     ESP_ERROR_CHECK(esp_zigbee_init(&zb_cfg));
     ESP_LOGI(TAG, "2. Стек инициализирован");
 
-    ezb_secur_tcpol_set_allow_rejoins_with_well_known_key(true);
-    ezb_secur_set_tclk_exchange_required(false);
-
     // Set default allowed network channels
-    ///    ESP_ERROR_CHECK(ezb_set_channel_mask(ESP_ZIGBEE_ALL_CHANNELS_MASK));
-    // Also set the channels for BDB commissioning
     ESP_ERROR_CHECK(ezb_bdb_set_primary_channel_set(ESP_ZIGBEE_ALL_CHANNELS_MASK));
     ESP_ERROR_CHECK(ezb_bdb_set_secondary_channel_set(0));
+    /* Set default allowed network channels */
+    ESP_ERROR_CHECK(ezb_set_channel_mask(ESP_ZIGBEE_ALL_CHANNELS_MASK));
+
+    static const uint8_t zigbee_alliance09_key[16] = {
+        0x5A, 0x69, 0x67, 0x42, 0x65, 0x65, 0x41, 0x6C,
+        0x6C, 0x69, 0x61, 0x6E, 0x63, 0x65, 0x30, 0x39};
+    ezb_secur_set_global_link_key(zigbee_alliance09_key);
+
+    ezb_af_node_desc_set_manuf_code(0x0115F); // Код производителя Lumi/Aqara 0x115
+    ezb_bdb_set_router_rejoin_required(true);
+    ezb_secur_set_kn_method_enabled(EZB_SECUR_KN_METHOD_STATIC_REQUEST_KEY, true);
+    ezb_secur_set_tclk_exchange_required(true);
+    ezb_secur_tcpol_set_allow_rejoins_with_well_known_key(true);
+    ezb_secur_set_kn_method_enabled(EZB_SECUR_KN_METHOD_ECSPEKE_CURVE25519_AESMMO, true);
+    ezb_secur_set_kn_method_enabled(EZB_SECUR_KN_METHOD_ECSPEKE_CURVE25519_SHA256, true);
 
     // Set default network type
     ezb_aps_secur_enable_distributed_security(true);
-
-    // Здесь вызывается ezb_config_memory(&mem_cfg) и регистрация эндпоинта
-    coordinator_register_endpoint();
-
     // Register application signal handler
     ESP_ERROR_CHECK(ezb_app_signal_add_handler(zb_app_signal_handler));
 
-    ezb_af_node_desc_set_manuf_code(0x115F);
-    // Enable CLI managed ep_list
-    // esp_zb_console_manage_ep_list(NULL);
+    ezb_af_node_desc_set_manuf_code(0x115F); // TODO: делать только для Aqara
+
+    /// Регистрация обработчика всех входящих ZCL-событий и ответов
+    setup_coord_trust_center_addr();
+    ezb_zcl_core_action_handler_register(zb_action_handler);
+    // Здесь вызывается ezb_config_memory(&mem_cfg) и регистрация эндпоинта
+    coordinator_register_endpoint();
+    ESP_ERROR_CHECK(ezb_dev_start(true));
+    ESP_LOGI(TAG, "start");
 }
 
 static void zb_stack_main_task(void *pvParameters)
 {
     zb_stack_init();
 
-    ESP_ERROR_CHECK(esp_zigbee_start(false));
+    esp_zigbee_start(false);
 
-    ///  ESP_ERROR_CHECK(ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_FORMATION));
+    ESP_ERROR_CHECK(ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_INITIALIZATION));
+   ///  ESP_ERROR_CHECK(ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_FORMATION));
 
-    esp_zigbee_launch_mainloop();
+    ESP_ERROR_CHECK(esp_zigbee_launch_mainloop());
 
     esp_zigbee_deinit();
     vTaskDelete(NULL);
@@ -300,10 +310,7 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    //    ESP_ERROR_CHECK(esp_zb_console_init());
     xTaskCreate(zb_stack_main_task, "Zigbee_main", 4096, NULL, 5, NULL);
-    //    ESP_LOGI(TAG, "Start ESP Zigbee Console");
-    //   ESP_ERROR_CHECK(esp_zb_console_start());
 }
 #endif
 #ifdef USE_CONSOLE

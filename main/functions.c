@@ -73,7 +73,7 @@ void aqara_read_basic_attrs(uint16_t short_addr)
 {
     static uint16_t attr_ids[] = {
         EZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, // 0x0004
-                                                 //        EZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,  // 0x0005
+        EZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,  // 0x0005
     };
 
     ezb_zcl_read_attr_cmd_t cmd_req = {
@@ -97,8 +97,6 @@ void aqara_read_basic_attrs(uint16_t short_addr)
 }
 
 // 1. Callback-функция, которая примет ответ Active Endpoint Response от устройства
-// 1. Callback-функция с точным типом из zdo_dev_srv_disc.h
-
 // Callback результата Bind Request
 void zdo_bind_cb(const ezb_zdp_bind_req_result_t *result, void *user_ctx)
 {
@@ -151,7 +149,7 @@ void zdo_active_ep_cb(const ezb_zdo_active_ep_req_result_t *result, void *user_c
         ESP_LOGW(TAG, "Active EP request failed or timeout");
         return;
     }
-     ESP_LOGI(TAG, "Active EP response from 0x%04x: count=%d",
+    ESP_LOGI(TAG, "Active EP response from 0x%04x: count=%d",
              s_joining_dev.short_addr, result->rsp->active_ep_count);
 
     for (uint8_t i = 0; i < result->rsp->active_ep_count; i++)
@@ -162,14 +160,12 @@ void zdo_active_ep_cb(const ezb_zdo_active_ep_req_result_t *result, void *user_c
             target_ep = result->rsp->active_ep_list[0];
         }
     }
-       // 1. Сюда перенесите ваш вызов ZCL Read Basic (0x0004, 0x0005) на s_joining_dev.short_addr, target_ep
+    // 1. Сюда перенесите ваш вызов ZCL Read Basic (0x0004, 0x0005) на s_joining_dev.short_addr, target_ep
     send_zcl_read_basic(s_joining_dev.short_addr, target_ep);
 
     // 2. Отправляем два Bind Request точно как в эталонной трассе TI (кадры 331 и 337)
     send_bind_request(s_joining_dev.short_addr, &s_joining_dev.ieee_addr, target_ep, 0x0006); // On/Off
     send_bind_request(s_joining_dev.short_addr, &s_joining_dev.ieee_addr, target_ep, 0x0001); // Power Config
-
-
 }
 
 void send_zcl_read_basic(uint16_t short_addr, uint8_t target_ep)
@@ -199,8 +195,6 @@ void send_zcl_read_basic(uint16_t short_addr, uint8_t target_ep)
     ESP_LOGI(TAG, "Отправлен ZCL Read Basic (0x0004, 0x0005) на 0x%04hx, err=0x%x", short_addr, err);
 }
 
-
-
 void setup_coord_trust_center_addr(void)
 {
     uint8_t mac_802154[8] = {0};
@@ -208,7 +202,8 @@ void setup_coord_trust_center_addr(void)
 
     ezb_extaddr_t coord_ieee = {0};
     uint8_t *dst = (uint8_t *)&coord_ieee;
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 8; i++)
+    {
         dst[i] = mac_802154[7 - i];
     }
 

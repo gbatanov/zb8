@@ -1,7 +1,7 @@
 #pragma once
 
 #ifndef USE_CONSOLE
-#define USE_CONSOLE
+//#define USE_CONSOLE
 #endif
 #include "esp_zigbee.h"
 #include "ezbee/nwk.h"
