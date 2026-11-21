@@ -13,7 +13,23 @@
 #include "esp_mac.h"
 #include "ezbee/nwk.h"
 #include "ezbee/aps.h"
+#include "driver/uart.h"
 
+
+#include "esp_event.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "ezbee/secur.h"
+#include "ezbee/bdb.h"
+#include "ezbee/af.h"
+#include "ezbee/zcl.h"
+#include "ezbee/nwk.h"
+#include "ezbee/zdo/zdo_dev_srv_disc.h"
+#include "ezbee/zdo/zdo_bind_mgmt.h"
+#include "esp_zigbee.h"
+#include "ezbee/nwk.h"
+#include "ezbee/zdo/zdo_dev_srv_disc.h"
+#include "ezbee/zdo/zdo_bind_mgmt.h"
 #include "coordinator.h"
 
 extern const char *TAG;
@@ -228,4 +244,72 @@ void setup_coord_trust_center_addr(void)
     ESP_LOGI(TAG, "TC IEEE: %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
              *(p + 7), *(p + 6), *(p + 5), *(p + 4),
              *(p + 3), *(p + 2), *(p + 1), *(p + 0));
+}
+
+// Callback из Zigbee-стека при получении любого ZCL-кадра
+bool zb_raw_zcl_handler(uint8_t bufid) {
+    esp_zb_zcl_cmd_info_t cmd_info;
+    // Извлекаем метаданные пакета (адреса, кластер, manuf_code, RSSI/LQI)
+    memcpy(&cmd_info, zb_buf_get_param(bufid, esp_zb_zcl_cmd_info_t), sizeof(cmd_info));
+
+    uint16_t payload_len = zb_buf_len(bufid);
+    uint8_t *payload_ptr = zb_buf_begin(bufid);
+
+    // Формируем буфер для отправки на ПК по нашему протоколу (CMD = 0x21)
+    uint8_t tx_buf[256];
+    if (payload_len + 12 > sizeof(tx_buf)) {
+        zb_buf_free(bufid);
+        return true;
+    }
+
+    int idx = 0;
+    tx_buf[idx++] = cmd_info.addr_source.u.short_addr & 0xFF;
+    tx_buf[idx++] = (cmd_info.addr_source.u.short_addr >> 8) & 0xFF;
+    tx_buf[idx++] = cmd_info.src_endpoint;
+    tx_buf[idx++] = cmd_info.dst_endpoint;
+    tx_buf[idx++] = cmd_info.cluster & 0xFF;
+    tx_buf[idx++] = (cmd_info.cluster >> 8) & 0xFF;
+    tx_buf[idx++] = cmd_info.manuf_code & 0xFF;
+    tx_buf[idx++] = (cmd_info.manuf_code >> 8) & 0xFF;
+    tx_buf[idx++] = (uint8_t)cmd_info.rssi;
+    tx_buf[idx++] = cmd_info.lqi;
+    tx_buf[idx++] = cmd_info.zcl_frame_control;
+    tx_buf[idx++] = cmd_info.cmd_id;
+
+    if (payload_len > 0) {
+        memcpy(&tx_buf[idx], payload_ptr, payload_len);
+        idx += payload_len;
+    }
+
+    // Освобождаем буфер Zigbee-стека ДО отправки в UART, чтобы не блокировать радио!
+    zb_buf_free(bufid);
+
+    // Кладем в очередь отправки на ПК (с контролем SEQ и ожиданием ACK)
+    proto_enqueue_tx(CMD_ZCL_RECV_RAW, tx_buf, idx);
+
+    return true; // Говорим стеку, что кадр обработан
+}
+
+
+
+#define PROTO_UART_NUM      UART_NUM_0
+#define PROTO_UART_BAUD     921600
+#define PROTO_RX_BUF_SIZE   2048
+#define PROTO_TX_BUF_SIZE   2048
+
+void proto_uart_init(void) {
+    const uart_config_t uart_config = {
+        .baud_rate = PROTO_UART_BAUD,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+
+    // Устанавливаем драйвер с кольцевыми буферами RX и TX
+    ESP_ERROR_CHECK(uart_driver_install(PROTO_UART_NUM, PROTO_RX_BUF_SIZE, PROTO_TX_BUF_SIZE, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(PROTO_UART_NUM, &uart_config));
+    // Оставляем штатные пины UART0 (TX = GPIO24, RX = GPIO23)
+    ESP_ERROR_CHECK(uart_set_pin(PROTO_UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 }

@@ -62,3 +62,4 @@ void send_bind_request(uint16_t dst_short_addr, const ezb_extaddr_t *dev_ieee,
                               uint8_t src_ep, uint16_t cluster_id);
 
 void setup_coord_trust_center_addr(void);
+bool zb_raw_zcl_handler(uint8_t bufid);
