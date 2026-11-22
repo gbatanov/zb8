@@ -1,207 +1,16 @@
-#ifndef OLD_VERSION
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <inttypes.h>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
-#include "driver/uart.h"
-#include "esp_event.h"
-#include "esp_log.h"
-#include "nvs_flash.h"
+#include "coordinator.h"
 
-#include "esp_zigbee.h"
-#include "ezbee/af.h"
-#include "ezbee/aps.h"
-#include "ezbee/bdb.h"
-#include "ezbee/nwk.h"
-#include "ezbee/secur.h"
-#include "ezbee/zcl.h"
-#include "ezbee/zdo/zdo_bind_mgmt.h"
-#include "ezbee/zdo/zdo_dev_srv_disc.h"
+extern SemaphoreHandle_t ack_sem;
+extern QueueHandle_t q_to_pc;
+extern SemaphoreHandle_t tx_mutex;
+extern volatile uint8_t waiting_ack_seq;
+extern const char *TAG;
 
-static const char *TAG = "GSB_ZB8_NCP";
+uint8_t last_rx_seq = 0xFF;
+volatile bool is_first_rx_packet = true;
 
-/* ==================== НАСТРОЙКИ ZIGBEE ==================== */
-#define MAX_CHILDREN 32
-#define INSTALLCODE_POLICY_ENABLE false
-#define ESP_ZIGBEE_STORAGE_PARTITION "nvs"
-#define ZB_COORD_ENDPOINT 1
-// Все каналы 11..26: 0x07FFF800U (сейчас оставлен 15-й канал 0x00008000U)
-#define ZB_CHANNELS_MASK (0x00008000U)
-
-/* ==================== НАСТРОЙКИ UART0 И ПРОТОКОЛА ==================== */
-#define PROTO_UART_NUM UART_NUM_0
-#define PROTO_UART_BAUD 115200
-#define PROTO_MAX_PAYLOAD 256
-#define PROTO_ACK_TIMEOUT_MS 150
-#define PROTO_MAX_RETRIES 3
-
-#define PROTO_SOF_0 0xC0
-#define PROTO_SOF_1 0xC0
-
-typedef enum
-{
-    PKT_TYPE_DATA = 0x01,
-    PKT_TYPE_ACK = 0x02,
-    PKT_TYPE_NACK = 0x03,
-} proto_pkt_type_t;
-
-/* Команды бинарного протокола (ESP32-H2 <-> Golang ПК) */
-typedef enum
-{
-    CMD_PERMIT_JOIN = 0x01,  // ПК -> ESP: [duration_sec (1B)]
-    CMD_DEV_ANNOUNCE = 0x02, // ESP -> ПК: [short (2B)] [ieee (8B)] [capability (1B)]
-    CMD_DEV_LEAVE = 0x03,    // ESP -> ПК: [short (2B)] [ieee (8B)]
-    CMD_ZDO_BIND_REQ = 0x12, // ПК -> ESP: [dst_short (2B)] [src_ieee (8B)] [src_ep (1B)] [cluster (2B)] [dst_ep (1B)]
-    CMD_APS_SEND_RAW = 0x20, // ПК -> ESP: [dst_short (2B)] [src_ep (1B)] [dst_ep (1B)] [profile_id (2B)] [cluster_id (2B)] [tx_opt (1B)] [asdu...]
-    CMD_APS_RECV_RAW = 0x21, // ESP -> ПК: [src_short (2B)] [src_ep (1B)] [dst_ep (1B)] [profile_id (2B)] [cluster_id (2B)] [rssi (1B)] [lqi (1B)] [asdu...]
-    CMD_APS_DATA_CNF = 0x22, // ESP -> ПК: [dst_short (2B)] [dst_ep (1B)] [cluster_id (2B)] [status (1B)]
-    CMD_SYS_PING = 0xF0,     // ПК <-> ESP: [uptime_sec (4B)] [pan_id (2B)] [channel (1B)]
-} proto_cmd_t;
-
-typedef struct
-{
-    uint8_t cmd;
-    uint16_t len;
-    uint8_t payload[PROTO_MAX_PAYLOAD];
-} bridge_msg_t;
-
-typedef enum
-{
-    STATE_WAIT_SOF0,
-    STATE_WAIT_SOF1,
-    STATE_READ_HEADER,
-    STATE_READ_PAYLOAD,
-    STATE_READ_CRC
-} parser_state_t;
-
-static QueueHandle_t q_to_pc;
-static SemaphoreHandle_t tx_mutex;
-static SemaphoreHandle_t ack_sem;
-
-static uint8_t tx_seq_counter = 0;
-static uint8_t last_rx_seq = 0xFF;
-static volatile uint8_t waiting_ack_seq = 0;
-static volatile bool is_first_rx_packet = true;
-
-/* ==================== CRC16 (MODBUS) ==================== */
-static uint16_t calc_crc16(const uint8_t *data, size_t len)
-{
-    uint16_t crc = 0xFFFF;
-    for (size_t i = 0; i < len; i++)
-    {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++)
-        {
-            crc = (crc & 0x0001) ? ((crc >> 1) ^ 0xA001) : (crc >> 1);
-        }
-    }
-    return crc;
-}
-
-/* ==================== НИЗКОУРОВНЕВАЯ ОТПРАВКА В UART0 ==================== */
-static void uart_send_raw_frame(uint8_t seq, uint8_t type, uint8_t cmd, const uint8_t *payload, uint16_t len)
-{
-    uint8_t header[7];
-    header[0] = PROTO_SOF_0;
-    header[1] = PROTO_SOF_1;
-    header[2] = seq;
-    header[3] = type;
-    header[4] = cmd;
-    header[5] = (uint8_t)(len & 0xFF);
-    header[6] = (uint8_t)((len >> 8) & 0xFF);
-
-    uint16_t crc = 0xFFFF;
-    for (int i = 2; i < 7; i++)
-    {
-        crc ^= header[i];
-        for (int j = 0; j < 8; j++)
-        {
-            crc = (crc & 1) ? ((crc >> 1) ^ 0xA001) : (crc >> 1);
-        }
-    }
-    for (uint16_t i = 0; i < len; i++)
-    {
-        crc ^= payload[i];
-        for (int j = 0; j < 8; j++)
-        {
-            crc = (crc & 1) ? ((crc >> 1) ^ 0xA001) : (crc >> 1);
-        }
-    }
-
-    uint8_t crc_bytes[2] = {(uint8_t)(crc & 0xFF), (uint8_t)((crc >> 8) & 0xFF)};
-
-    xSemaphoreTake(tx_mutex, portMAX_DELAY);
-    uart_write_bytes(PROTO_UART_NUM, (const char *)header, sizeof(header));
-    if (len > 0 && payload != NULL)
-    {
-        uart_write_bytes(PROTO_UART_NUM, (const char *)payload, len);
-    }
-    uart_write_bytes(PROTO_UART_NUM, (const char *)crc_bytes, sizeof(crc_bytes));
-    xSemaphoreGive(tx_mutex);
-}
-
-static void bridge_enqueue_to_pc(uint8_t cmd, const uint8_t *payload, uint16_t len)
-{
-    if (len > PROTO_MAX_PAYLOAD)
-    {
-        ESP_LOGW(TAG, "Payload too large for PC: %u", len);
-        return;
-    }
-    bridge_msg_t msg = {
-        .cmd = cmd,
-        .len = len,
-    };
-    if (len > 0 && payload != NULL)
-    {
-        memcpy(msg.payload, payload, len);
-    }
-    if (xQueueSend(q_to_pc, &msg, pdMS_TO_TICKS(10)) != pdTRUE)
-    {
-        ESP_LOGE(TAG, "TX queue to PC full! Dropping CMD=0x%02X", cmd);
-    }
-}
-
-/* ==================== ЗАДАЧА TX (НАДЕЖНАЯ ОТПРАВКА НА ПК С ACK) ==================== */
-static void proto_tx_task(void *arg)
-{
-    ESP_LOGI(TAG, "proto_tx_task start");
-
-    bridge_msg_t msg;
-    while (1)
-    {
-        if (xQueueReceive(q_to_pc, &msg, portMAX_DELAY) == pdTRUE)
-        {
-            uint8_t seq = ++tx_seq_counter;
-            waiting_ack_seq = seq;
-            xSemaphoreTake(ack_sem, 0);
-
-            bool delivered = false;
-            for (int attempt = 0; attempt < PROTO_MAX_RETRIES; attempt++)
-            {
-                ESP_LOGI(TAG, "proto_tx_task uart_send_raw_frame");
-                uart_send_raw_frame(seq, PKT_TYPE_DATA, msg.cmd, msg.payload, msg.len);
-                if (xSemaphoreTake(ack_sem, pdMS_TO_TICKS(PROTO_ACK_TIMEOUT_MS)) == pdTRUE)
-                {
-                    delivered = true;
-                    break;
-                }
-                ESP_LOGW(TAG, "ACK timeout SEQ=%u (CMD=0x%02X), retry %d", seq, msg.cmd, attempt + 1);
-            }
-
-            if (!delivered)
-            {
-                ESP_LOGE(TAG, "Failed to deliver SEQ=%u to PC", seq);
-            }
-        }
-    }
-}
-
-/* ==================== ИСПОЛНЕНИЕ КОМАНД ОТ ПК В СТЕКЕ EZBEE ==================== */
+// Выполнение команд от ПО Zhub  в стеке zigbee(ezbee) 
 static void zdo_bind_bridge_cb(const ezb_zdp_bind_req_result_t *result, void *user_ctx)
 {
     ESP_LOGI(TAG, "ZDO Bind completed (result=%p)", result);
@@ -346,7 +155,7 @@ static void execute_pc_command(uint8_t cmd, const uint8_t *payload, uint16_t len
 }
 
 /* ==================== ЗАДАЧА RX (ПАРСЕР ВХОДЯЩИХ КАДРОВ ОТ ПК) ==================== */
-static void on_valid_pc_frame(uint8_t seq, uint8_t type, uint8_t cmd, const uint8_t *payload, uint16_t len)
+void on_valid_pc_frame(uint8_t seq, uint8_t type, uint8_t cmd, const uint8_t *payload, uint16_t len)
 {
     if (type == PKT_TYPE_ACK)
     {
@@ -370,107 +179,6 @@ static void on_valid_pc_frame(uint8_t seq, uint8_t type, uint8_t cmd, const uint
         last_rx_seq = seq;
 
         execute_pc_command(cmd, payload, len);
-    }
-}
-
-static void proto_rx_task(void *arg)
-{
-    ESP_LOGI(TAG, "proto_rx_task start");
-    parser_state_t state = STATE_WAIT_SOF0;
-    uint8_t hdr[5]; // [0]=seq, [1]=type, [2]=cmd, [3]=len_l, [4]=len_h
-    uint8_t hdr_idx = 0;
-    uint16_t payload_len = 0;
-    uint16_t payload_idx = 0;
-    uint8_t payload_buf[PROTO_MAX_PAYLOAD];
-    uint8_t crc_buf[2];
-    uint8_t crc_idx = 0;
-
-    uint8_t rx_chunk[64];
-    while (1)
-    {
-        int n = uart_read_bytes(PROTO_UART_NUM, rx_chunk, sizeof(rx_chunk), pdMS_TO_TICKS(20));
-        if (n > 0)
-            ESP_LOGI(TAG, "rx_task n=%d", n);
-        for (int i = 0; i < n; i++)
-        {
-            uint8_t b = rx_chunk[i];
-            ESP_LOGI(TAG, "rx_task state=%d", state);
-            switch (state)
-            {
-            case STATE_WAIT_SOF0:
-                if (b == PROTO_SOF_0)
-                    state = STATE_WAIT_SOF1;
-                break;
-
-            case STATE_WAIT_SOF1:
-                if (b == PROTO_SOF_1)
-                {
-                    hdr_idx = 0;
-                    state = STATE_READ_HEADER;
-                }
-                else if (b != PROTO_SOF_0)
-                {
-                    state = STATE_WAIT_SOF0;
-                }
-                break;
-
-            case STATE_READ_HEADER:
-                hdr[hdr_idx++] = b;
-                if (hdr_idx == 5)
-                {
-                    payload_len = hdr[3] | ((uint16_t)hdr[4] << 8);
-                    if (payload_len > PROTO_MAX_PAYLOAD)
-                    {
-                        state = STATE_WAIT_SOF0;
-                    }
-                    else if (payload_len == 0)
-                    {
-                        crc_idx = 0;
-                        state = STATE_READ_CRC;
-                    }
-                    else
-                    {
-                        payload_idx = 0;
-                        state = STATE_READ_PAYLOAD;
-                    }
-                }
-                break;
-
-            case STATE_READ_PAYLOAD:
-                payload_buf[payload_idx++] = b;
-                if (payload_idx == payload_len)
-                {
-                    crc_idx = 0;
-                    state = STATE_READ_CRC;
-                }
-                break;
-
-            case STATE_READ_CRC:
-                crc_buf[crc_idx++] = b;
-                if (crc_idx == 2)
-                {
-                    uint16_t rx_crc = crc_buf[0] | ((uint16_t)crc_buf[1] << 8);
-                    uint8_t check_buf[5 + PROTO_MAX_PAYLOAD];
-                    memcpy(check_buf, hdr, 5);
-                    if (payload_len > 0)
-                    {
-                        memcpy(check_buf + 5, payload_buf, payload_len);
-                    }
-
-                    if (calc_crc16(check_buf, 5 + payload_len) == rx_crc)
-                    {
-                        on_valid_pc_frame(hdr[0], hdr[1], hdr[2], payload_buf, payload_len);
-                    }
-                    else
-                    {
-                        ESP_LOGE(TAG, "CRC mismatch on SEQ=%u", hdr[0]);
-                        uart_send_raw_frame(hdr[0], PKT_TYPE_NACK, hdr[2], NULL, 0);
-                    }
-                    state = STATE_WAIT_SOF0;
-                }
-                break;
-            }
-        }
     }
 }
 
@@ -668,7 +376,7 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
     return true;
 }
 
-static void esp_zb_task(void *pvParameters)
+void esp_zb_task(void *pvParameters)
 {
     esp_zigbee_config_t zb_cfg = {
         .platform_config = {
@@ -699,37 +407,3 @@ static void esp_zb_task(void *pvParameters)
     ESP_ERROR_CHECK(esp_zigbee_start(false));
     esp_zigbee_launch_mainloop();
 }
-
-/* ==================== ТОЧКА ВХОДА ==================== */
-void app_main(void)
-{
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    q_to_pc = xQueueCreate(32, sizeof(bridge_msg_t));
-    tx_mutex = xSemaphoreCreateMutex();
-    ack_sem = xSemaphoreCreateBinary();
-
-    const uart_config_t uart_config = {
-        .baud_rate = PROTO_UART_BAUD,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-    ESP_ERROR_CHECK(uart_param_config(PROTO_UART_NUM, &uart_config));
-    ESP_ERROR_CHECK(uart_set_pin(PROTO_UART_NUM, 24, 23, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-    ESP_ERROR_CHECK(uart_driver_install(PROTO_UART_NUM, 2048, 2048, 0, NULL, 0));
-
-    xTaskCreate(proto_rx_task, "proto_rx", 4096, NULL, 10, NULL);
-    xTaskCreate(proto_tx_task, "proto_tx", 4096, NULL, 9, NULL);
-    xTaskCreate(esp_zb_task, "zb_main", 8192, NULL, 5, NULL);
-}
-
-#endif
