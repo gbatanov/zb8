@@ -1,7 +1,7 @@
 {
     "idf.currentSetup": "/Users/gbatanov/work/esp-idf/v6.0/esp-idf",
     "idf.port": "/dev/tty.usbmodem14801",
-    "idf.monitorPort": "/dev/tty.usbmodem58970173491",
+    "idf.monitorPort": "/dev/tty.usbmodem14801",
     "idf.openOcdConfigs": [
         "board/esp32h2-builtin.cfg"
     ],
