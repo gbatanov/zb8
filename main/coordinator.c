@@ -9,178 +9,8 @@ extern const char *TAG;
 
 uint8_t last_rx_seq = 0xFF;
 volatile bool is_first_rx_packet = true;
-
-// Выполнение команд от ПО Zhub  в стеке zigbee(ezbee) 
-static void zdo_bind_bridge_cb(const ezb_zdp_bind_req_result_t *result, void *user_ctx)
-{
-    ESP_LOGI(TAG, "ZDO Bind completed (result=%p)", result);
-}
-
-static void execute_pc_command(uint8_t cmd, const uint8_t *payload, uint16_t len)
-{
-    switch (cmd)
-    {
-    case CMD_SYS_PING:
-    {
-        uint8_t status[7];
-        uint32_t uptime = (uint32_t)(xTaskGetTickCount() / configTICK_RATE_HZ);
-
-        esp_zigbee_lock_acquire(portMAX_DELAY);
-        uint16_t pan_id = ezb_get_panid();
-        uint8_t channel = ezb_nwk_get_current_channel();
-        esp_zigbee_lock_release();
-
-        status[0] = (uint8_t)(uptime & 0xFF);
-        status[1] = (uint8_t)((uptime >> 8) & 0xFF);
-        status[2] = (uint8_t)((uptime >> 16) & 0xFF);
-        status[3] = (uint8_t)((uptime >> 24) & 0xFF);
-        status[4] = (uint8_t)(pan_id & 0xFF);
-        status[5] = (uint8_t)((pan_id >> 8) & 0xFF);
-        status[6] = channel;
-
-        bridge_enqueue_to_pc(CMD_SYS_PING, status, sizeof(status));
-        break;
-    }
-
-    case CMD_PERMIT_JOIN:
-    {
-        if (len >= 1)
-        {
-            uint8_t duration = payload[0];
-            esp_zigbee_lock_acquire(portMAX_DELAY);
-            ezb_err_t err = ezb_bdb_open_network(duration);
-            esp_zigbee_lock_release();
-            ESP_LOGI(TAG, "Permit Join (%u sec) -> err=0x%x", duration, err);
-        }
-        break;
-    }
-
-    case CMD_APS_SEND_RAW:
-    {
-        // Формат: [dst_short (2B)] [src_ep (1B)] [dst_ep (1B)] [profile_id (2B)] [cluster_id (2B)] [tx_opt (1B)] [asdu...]
-        if (len >= 9)
-        {
-            uint16_t dst_short = payload[0] | ((uint16_t)payload[1] << 8);
-            uint8_t src_ep = payload[2];
-            uint8_t dst_ep = payload[3];
-            uint16_t profile_id = payload[4] | ((uint16_t)payload[5] << 8);
-            uint16_t cluster_id = payload[6] | ((uint16_t)payload[7] << 8);
-            uint8_t tx_opt = payload[8];
-            uint16_t asdu_len = len - 9;
-
-            uint8_t *asdu_copy = NULL;
-            if (asdu_len > 0)
-            {
-                asdu_copy = (uint8_t *)malloc(asdu_len);
-                if (!asdu_copy)
-                {
-                    ESP_LOGE(TAG, "No memory for APS ASDU");
-                    break;
-                }
-                memcpy(asdu_copy, &payload[9], asdu_len);
-            }
-
-            ezb_apsde_data_req_t req = {
-                .dst_address = {
-                    .addr_mode = EZB_APS_ADDR_MODE_16_ENDP_PRESENT,
-                    .u.short_addr = dst_short,
-                },
-                .src_endpoint = src_ep,
-                .dst_endpoint = dst_ep,
-                .cluster_id = cluster_id,
-                .profile_id = profile_id,
-                .radius = 0,
-                .tx_options = (tx_opt == 0) ? (EZB_APSDE_TX_OPT_SECURITY_ENABLED | EZB_APSDE_TX_OPT_ACK_TX) : tx_opt,
-                .asdu_length = asdu_len,
-                .asdu = asdu_copy,
-            };
-
-            esp_zigbee_lock_acquire(portMAX_DELAY);
-            ezb_err_t err = ezb_apsde_data_request(&req);
-            esp_zigbee_lock_release();
-
-            if (asdu_copy)
-            {
-                free(asdu_copy);
-            }
-
-            if (err != EZB_ERR_NONE)
-            {
-                ESP_LOGE(TAG, "APS send failed to 0x%04X cluster 0x%04X: err=0x%x", dst_short, cluster_id, err);
-            }
-        }
-        break;
-    }
-
-    case CMD_ZDO_BIND_REQ:
-    {
-        // Формат: [dst_short (2B)] [src_ieee (8B)] [src_ep (1B)] [cluster_id (2B)] [dst_ep (1B)]
-        if (len >= 14)
-        {
-            uint16_t dst_short = payload[0] | ((uint16_t)payload[1] << 8);
-            uint8_t src_ep = payload[10];
-            uint16_t cluster_id = payload[11] | ((uint16_t)payload[12] << 8);
-            uint8_t dst_ep = payload[13];
-
-            esp_zigbee_lock_acquire(portMAX_DELAY);
-            ezb_extaddr_t coord_ieee = {0};
-            ezb_nwk_get_extended_address(&coord_ieee);
-
-            ezb_zdo_bind_req_t bind_req = {
-                .dst_nwk_addr = dst_short,
-                .field = {
-                    .src_ep = src_ep,
-                    .cluster_id = cluster_id,
-                    .dst_addr_mode = 0x03,
-                    .dst_ep = (dst_ep == 0) ? ZB_COORD_ENDPOINT : dst_ep,
-                },
-                .cb = zdo_bind_bridge_cb,
-                .user_ctx = NULL,
-            };
-            memcpy(&bind_req.field.src_addr, &payload[2], sizeof(ezb_extaddr_t));
-            memcpy(&bind_req.field.dst_addr, &coord_ieee, sizeof(ezb_extaddr_t));
-
-            ezb_err_t err = ezb_zdo_bind_req(&bind_req);
-            esp_zigbee_lock_release();
-
-            ESP_LOGI(TAG, "ZDO Bind to 0x%04X cluster 0x%04X -> err=0x%x", dst_short, cluster_id, err);
-        }
-        break;
-    }
-
-    default:
-        ESP_LOGW(TAG, "Unknown CMD from PC: 0x%02X", cmd);
-        break;
-    }
-}
-
-/* ==================== ЗАДАЧА RX (ПАРСЕР ВХОДЯЩИХ КАДРОВ ОТ ПК) ==================== */
-void on_valid_pc_frame(uint8_t seq, uint8_t type, uint8_t cmd, const uint8_t *payload, uint16_t len)
-{
-    if (type == PKT_TYPE_ACK)
-    {
-        if (seq == waiting_ack_seq)
-        {
-            xSemaphoreGive(ack_sem);
-        }
-        return;
-    }
-
-    if (type == PKT_TYPE_DATA)
-    {
-        uart_send_raw_frame(seq, PKT_TYPE_ACK, cmd, NULL, 0);
-
-        if (!is_first_rx_packet && seq == last_rx_seq)
-        {
-            ESP_LOGW(TAG, "Duplicate frame SEQ=%u ignored", seq);
-            return;
-        }
-        is_first_rx_packet = false;
-        last_rx_seq = seq;
-
-        execute_pc_command(cmd, payload, len);
-    }
-}
+// Можно обновлять при получении AF_DATA_REQUEST (0x2401)
+volatile uint8_t last_af_trans_id = 0;
 
 /* ==================== ПЕРЕХВАТЧИКИ APSDE-DATA СТЕКА EZBEE ==================== */
 static bool bridge_aps_data_ind_cb(const ezb_apsde_data_ind_t *ind)
@@ -188,59 +18,122 @@ static bool bridge_aps_data_ind_cb(const ezb_apsde_data_ind_t *ind)
     if (!ind)
         return false;
 
-    // Формат CMD_APS_RECV_RAW (10 байт заголовка + ASDU):
-    // [src_short (2B)] [src_ep (1B)] [dst_ep (1B)] [profile_id (2B)] [cluster_id (2B)] [rssi (1B)] [lqi (1B)] [asdu...]
-    if (ind->asdu_length + 10 <= PROTO_MAX_PAYLOAD)
+    uint16_t src_short = (ind->src_address.addr_mode == EZB_ADDR_MODE_SHORT)
+                             ? ind->src_address.u.short_addr
+                             : 0xFFFF;
+
+    // 1. Системные ZDO-сообщения (Profile ID == 0x0000)
+    if (ind->profile_id == 0x0000)
+    {
+        // Device_annce (0x0013) -> ZDO_END_DEVICE_ANNCE_IND (0x45C1)
+        // ASDU ZDO: [seq (1B)] [nwk_addr (2B)] [ieee_addr (8B)] [capability (1B)] = 12 байт
+        // ZNP 0x45C1: [SrcAddr (2B)] [NwkAddr (2B)] [IEEEAddr (8B)] [Capabilities (1B)] = 13 байт
+        if (ind->cluster_id == 0x0013 && ind->asdu_length >= 12 && ind->asdu != NULL)
+        {
+            uint8_t znp_annce[PROTO_MAX_PAYLOAD];
+            znp_annce[0] = (uint8_t)(src_short & 0xFF);
+            znp_annce[1] = (uint8_t)((src_short >> 8) & 0xFF);
+            memcpy(&znp_annce[2], ind->asdu + 1, 11); // NwkAddr(2) + IEEE(8) + Cap(1)
+            bridge_enqueue_to_pc(0x45C1, znp_annce, 13);
+        }
+        else if (ind->cluster_id == 0x0036)
+        {
+            // игнорируем запрос от себя же
+        }
+        // Остальные ZDO-ответы (ActiveEP 0x8005 -> 0x4585, SimpleDesc 0x8004 -> 0x4584 и т.д.)
+        // В ZNP формат: [SrcAddr (2B)] + [ASDU без первого байта seq (asdu_length - 1)]
+        else if ((ind->cluster_id & 0x8000) && ind->asdu_length >= 2 && ind->asdu != NULL)
+        {
+            uint16_t znp_cmd = 0x4580 | (uint8_t)(ind->cluster_id & 0x7F);
+            uint8_t znp_zdo[PROTO_MAX_PAYLOAD];
+            uint16_t payload_len = (uint16_t)(ind->asdu_length - 1);
+
+            if (payload_len + 2 <= PROTO_MAX_PAYLOAD)
+            {
+                *(znp_zdo + 0) = (uint8_t)(src_short & 0xFF);
+                *(znp_zdo + 1) = (uint8_t)((src_short >> 8) & 0xFF);
+                memcpy(znp_zdo + 2, ind->asdu + 1, payload_len);
+                bridge_enqueue_to_pc(znp_cmd, znp_zdo, payload_len + 2);
+                ESP_LOGI(TAG, "znp_cmd 0x%04X", znp_cmd);
+            }
+        }
+        return false;
+    }
+
+    // 2. Прикладные ZCL-сообщения (Profile ID != 0x0000) -> AF_INCOMING_MSG (0x4481)
+    // Формат ZNP 0x4481 (17 байт заголовка + Data):
+    // [GroupID (2B)] [ClusterID (2B)] [SrcAddr (2B)] [SrcEndpoint (1B)] [DstEndpoint (1B)]
+    // [WasBroadcast (1B)] [LinkQuality (1B)] [SecurityUse (1B)] [TimeStamp (4B)]
+    // [TransSeqNumber (1B)] [Len (1B)] [Data (Len B)]
+    // То, что приходит в Message
+    if (ind->asdu_length + 17 <= PROTO_MAX_PAYLOAD)
     {
         uint8_t out[PROTO_MAX_PAYLOAD];
         int idx = 0;
 
-        uint16_t src_short = (ind->src_address.addr_mode == EZB_ADDR_MODE_SHORT)
-                                 ? ind->src_address.u.short_addr
-                                 : 0xFFFF;
+        // GroupID (0x0000 если не групповая рассылка)
+        uint16_t group_id = (ind->dst_address.addr_mode == EZB_ADDR_MODE_GROUP)
+                                ? ind->dst_address.u.group_addr.group
+                                : 0x0000;
+        out[idx++] = (uint8_t)(group_id & 0xFF);
+        out[idx++] = (uint8_t)((group_id >> 8) & 0xFF);
 
-        out[idx++] = (uint8_t)(src_short & 0xFF);
-        out[idx++] = (uint8_t)((src_short >> 8) & 0xFF);
-        out[idx++] = ind->src_endpoint;
-        out[idx++] = ind->dst_endpoint;
-        out[idx++] = (uint8_t)(ind->profile_id & 0xFF);
-        out[idx++] = (uint8_t)((ind->profile_id >> 8) & 0xFF);
+        // ClusterID
         out[idx++] = (uint8_t)(ind->cluster_id & 0xFF);
         out[idx++] = (uint8_t)((ind->cluster_id >> 8) & 0xFF);
-        out[idx++] = (uint8_t)ind->rssi;
-        out[idx++] = ind->lqi;
 
+        // SrcAddr
+        out[idx++] = (uint8_t)(src_short & 0xFF);
+        out[idx++] = (uint8_t)((src_short >> 8) & 0xFF);
+
+        // SrcEndpoint, DstEndpoint
+        out[idx++] = ind->src_endpoint;
+        out[idx++] = ind->dst_endpoint;
+
+        // WasBroadcast, LinkQuality, SecurityUse
+        out[idx++] = 0x00;
+        out[idx++] = ind->lqi;
+        out[idx++] = 0x00;
+
+        // TimeStamp (4 байта)
+        out[idx++] = 0x00;
+        out[idx++] = 0x00;
+        out[idx++] = 0x00;
+        out[idx++] = 0x00;
+
+        // TransSeqNumber (берём из ZCL-заголовка, если есть, или 0)
+        uint8_t tsn = (ind->asdu_length >= 2 && ind->asdu != NULL) ? *(ind->asdu + 1) : 0x00;
+        out[idx++] = tsn;
+
+        // Len + Data
+        out[idx++] = (uint8_t)ind->asdu_length;
         if (ind->asdu_length > 0 && ind->asdu != NULL)
         {
             memcpy(&out[idx], ind->asdu, ind->asdu_length);
             idx += ind->asdu_length;
         }
 
-        bridge_enqueue_to_pc(CMD_APS_RECV_RAW, out, (uint16_t)idx);
+        bridge_enqueue_to_pc(0x4481, out, (uint16_t)idx);
     }
 
-    // Возвращаем false, чтобы системный стек продолжил базовую обработку (ZDO/BDB/DefaultRsp)
     return false;
 }
 
 static void bridge_aps_data_cnf_cb(const ezb_apsde_data_confirm_t *confirm)
 {
-    if (!confirm)
+   if (!confirm)
         return;
 
-    uint8_t out[6];
-    uint16_t dst_short = (confirm->dst_address.addr_mode == EZB_ADDR_MODE_SHORT)
-                             ? confirm->dst_address.u.short_addr
-                             : 0xFFFF;
+    // В TI ZNP AF_DATA_CONFIRM (0x4480) отправляется только для прикладных эндпоинтов (1..240), не для ZDO (0)
+    if (confirm->src_endpoint == 0)
+        return;
 
-    out[0] = (uint8_t)(dst_short & 0xFF);
-    out[1] = (uint8_t)((dst_short >> 8) & 0xFF);
-    out[2] = confirm->dst_endpoint;
-    out[3] = (uint8_t)(confirm->cluster_id & 0xFF);
-    out[4] = (uint8_t)((confirm->cluster_id >> 8) & 0xFF);
-    out[5] = confirm->status;
+    uint8_t out[3];
+    out[0] = (uint8_t)confirm->status;   // Status (0x00 = Success)
+    out[1] = confirm->src_endpoint;      // Endpoint
+    out[2] = last_af_trans_id;           // TransID
 
-    bridge_enqueue_to_pc(CMD_APS_DATA_CNF, out, sizeof(out));
+    bridge_enqueue_to_pc(0x4480, out, sizeof(out));
 }
 
 /* ==================== НАСТРОЙКА ZIGBEE КООРДИНАТОРА ==================== */
@@ -336,13 +229,14 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
         ezb_address_extended_by_short(short_addr, &ieee_addr);
 
         ESP_LOGI(TAG, "Device Announce: short=0x%04x, ieee=0x%016" PRIx64, short_addr, ieee_addr.u64);
-
-        uint8_t buf[11];
-        buf[0] = (uint8_t)(short_addr & 0xFF);
-        buf[1] = (uint8_t)((short_addr >> 8) & 0xFF);
-        memcpy(&buf[2], ieee_addr.u8, 8);
-        buf[10] = signal_params.dev_annce->capability;
-        bridge_enqueue_to_pc(CMD_DEV_ANNOUNCE, buf, sizeof(buf));
+        /*
+                uint8_t buf[11];
+                buf[0] = (uint8_t)(short_addr & 0xFF);
+                buf[1] = (uint8_t)((short_addr >> 8) & 0xFF);
+                memcpy(&buf[2], ieee_addr.u8, 8);
+                buf[10] = signal_params.dev_annce->capability;
+                bridge_enqueue_to_pc(CMD_DEV_ANNOUNCE, buf, sizeof(buf));
+                */
         break;
     }
 
@@ -357,12 +251,13 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
     {
         uint16_t short_addr = signal_params.leave_ind->short_addr;
         ESP_LOGI(TAG, "Device Left: short=0x%04x", short_addr);
-
-        uint8_t buf[10];
-        buf[0] = (uint8_t)(short_addr & 0xFF);
-        buf[1] = (uint8_t)((short_addr >> 8) & 0xFF);
-        memcpy(&buf[2], signal_params.leave_ind->device_addr.u8, 8);
-        bridge_enqueue_to_pc(CMD_DEV_LEAVE, buf, sizeof(buf));
+        /*
+                uint8_t buf[10];
+                buf[0] = (uint8_t)(short_addr & 0xFF);
+                buf[1] = (uint8_t)((short_addr >> 8) & 0xFF);
+                memcpy(&buf[2], signal_params.leave_ind->device_addr.u8, 8);
+                bridge_enqueue_to_pc(CMD_DEV_LEAVE, buf, sizeof(buf));
+                */
         break;
     }
 

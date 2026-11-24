@@ -23,8 +23,6 @@
 #include "ezbee/zdo/zdo_bind_mgmt.h"
 #include "ezbee/zdo/zdo_dev_srv_disc.h"
 
-
-
 /* ==================== НАСТРОЙКИ ZIGBEE ==================== */
 #define MAX_CHILDREN 32
 #define INSTALLCODE_POLICY_ENABLE false
@@ -36,12 +34,23 @@
 /* ==================== НАСТРОЙКИ UART0 И ПРОТОКОЛА ==================== */
 #define PROTO_UART_NUM UART_NUM_0
 #define PROTO_UART_BAUD 115200
-#define PROTO_MAX_PAYLOAD 256
+#define PROTO_MAX_PAYLOAD 255
 #define PROTO_ACK_TIMEOUT_MS 150
 #define PROTO_MAX_RETRIES 3
 
 #define PROTO_SOF_0 0xC0
 #define PROTO_SOF_1 0xC0
+#define ZNP_SOF 0xFE
+#define ZNP_MAX_DATA 255
+
+#define ZDO_BIND_REQ   0x2521
+#define ZDO_MGMT_PERMIT_JOIN_REQ 0x2536
+#define ZDO_MGMT_PERMIT_JOIN_SRSP 0x6536
+#define ZDO_MGMT_PERMIT_JOIN_RSP 0x45b6
+#define ZDO_PERMIT_JOIN_IND 0x45cb
+#define SYS_RESET_REQ 0x4100
+#define SYS_PING 0x2101
+#define AF_DATA_CONFIRM 0x4480
 
 typedef enum
 {
@@ -50,7 +59,7 @@ typedef enum
     PKT_TYPE_NACK = 0x03,
 } proto_pkt_type_t;
 
-/* Команды бинарного протокола (ESP32-H2 <-> Golang ПК) */
+/* Команды бинарного протокола (ESP32-H2 <-> Golang ПК) 
 typedef enum
 {
     CMD_PERMIT_JOIN = 0x01,  // ПК -> ESP: [duration_sec (1B)]
@@ -62,12 +71,11 @@ typedef enum
     CMD_APS_DATA_CNF = 0x22, // ESP -> ПК: [dst_short (2B)] [dst_ep (1B)] [cluster_id (2B)] [status (1B)]
     CMD_SYS_PING = 0xF0,     // ПК <-> ESP: [uptime_sec (4B)] [pan_id (2B)] [channel (1B)]
 } proto_cmd_t;
-
-typedef struct
-{
-    uint8_t cmd;
-    uint16_t len;
-    uint8_t payload[PROTO_MAX_PAYLOAD];
+*/
+typedef struct {
+    uint16_t cmd;
+    uint8_t len;
+    uint8_t payload[ZNP_MAX_DATA]; // 255 байт
 } bridge_msg_t;
 
 typedef enum
@@ -80,10 +88,13 @@ typedef enum
 } parser_state_t;
 
 uint16_t calc_crc16(const uint8_t *data, size_t len);
-void uart_send_raw_frame(uint8_t seq, uint8_t type, uint8_t cmd, const uint8_t *payload, uint16_t len);
-void bridge_enqueue_to_pc(uint8_t cmd, const uint8_t *payload, uint16_t len);
+//void uart_send_raw_frame(uint8_t seq, uint8_t type, uint8_t cmd, const uint8_t *payload, uint16_t len);
+void bridge_enqueue_to_pc(uint16_t cmd, const uint8_t *payload, uint16_t len);
 void proto_tx_task(void *arg);
 void proto_rx_task(void *arg);
 
 void esp_zb_task(void *pvParameters);
-void on_valid_pc_frame(uint8_t seq, uint8_t type, uint8_t cmd, const uint8_t *payload, uint16_t len);
+// void on_valid_pc_frame(uint8_t seq, uint8_t type, uint8_t cmd, const uint8_t *payload, uint16_t len);
+void znp_send_sys_reset_ind(void);
+void znp_send_frame(uint16_t cmd_id, const uint8_t *payload, uint8_t len);
+void bridge_enqueue_to_pc(uint16_t cmd, const uint8_t *payload, uint16_t len);
