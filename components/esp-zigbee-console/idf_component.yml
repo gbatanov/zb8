@@ -1,7 +1,0 @@
-version: "1.0.0"
-description: Espressif Zigbee Console Component
-url: https://github.com/espressif/esp-zigbee-sdk
-dependencies:
-  idf: ">=5.2"
-  espressif/esp-zigbee-lib:
-    version: ">=2.0.0"

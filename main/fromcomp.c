@@ -29,7 +29,7 @@ static void znp_handle_command(uint16_t cmd_id, const uint8_t *payload, uint8_t 
     case 0x2101: // SYS_PING (пример синхронного ответа SRSP = 0x6101)
     {
         uint8_t caps[2] = {0x79, 0x07}; // Capabilities (MT_CAP_SYS | MT_CAP_ZDO | MT_CAP_AF)
-        znp_send_frame(0x6101, caps, sizeof(caps));
+        bridge_enqueue_to_pc(0x6101, caps, sizeof(caps));
         break;
     }
     case ZDO_MGMT_PERMIT_JOIN_REQ:

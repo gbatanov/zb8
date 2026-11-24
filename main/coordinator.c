@@ -9,10 +9,10 @@ extern const char *TAG;
 
 uint8_t last_rx_seq = 0xFF;
 volatile bool is_first_rx_packet = true;
-// Можно обновлять при получении AF_DATA_REQUEST (0x2401)
-volatile uint8_t last_af_trans_id = 0;
 
-/* ==================== ПЕРЕХВАТЧИКИ APSDE-DATA СТЕКА EZBEE ==================== */
+volatile uint8_t last_af_trans_id = 0; // последний номер транзакции
+
+// Перехватчики APSDE-DATA стека EZBEE
 static bool bridge_aps_data_ind_cb(const ezb_apsde_data_ind_t *ind)
 {
     if (!ind)
@@ -119,6 +119,7 @@ static bool bridge_aps_data_ind_cb(const ezb_apsde_data_ind_t *ind)
     return false;
 }
 
+// Отправка AF_DATA_CONFIRM (0x4480)
 static void bridge_aps_data_cnf_cb(const ezb_apsde_data_confirm_t *confirm)
 {
     if (!confirm)
@@ -135,8 +136,10 @@ static void bridge_aps_data_cnf_cb(const ezb_apsde_data_confirm_t *confirm)
 
     bridge_enqueue_to_pc(0x4480, out, sizeof(out));
 }
+//-------------------------------------------
+// Настройка ZIGBEE координатора
 
-/* ==================== НАСТРОЙКА ZIGBEE КООРДИНАТОРА ==================== */
+// Вывод основных параметров сети
 static void log_nwk_info(const char *status_string)
 {
     ezb_extaddr_t extpanid;
@@ -152,6 +155,7 @@ static void setup_coord_trust_center_addr(void)
     ezb_aps_set_trust_center_address(&coord_ieee);
 }
 
+// регистрация обязательного эндпойнта самого координатора
 static void coordinator_register_endpoint(void)
 {
     ezb_af_device_desc_t dev_desc = ezb_af_create_device_desc();
@@ -165,7 +169,7 @@ static void coordinator_register_endpoint(void)
 
     ezb_af_ep_desc_t ep_desc = ezb_af_create_gateway_endpoint(&ep_cfg);
 
-    // Добавляем клиентские кластеры для приёма отчётов и команд от датчиков/кнопок
+    // Добавляем клиентские кластеры для приёма отчётов и команд (обязательный набор)
     ezb_af_endpoint_add_cluster_desc(ep_desc, ezb_zcl_power_config_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
     ezb_af_endpoint_add_cluster_desc(ep_desc, ezb_zcl_on_off_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
     ezb_af_endpoint_add_cluster_desc(ep_desc, ezb_zcl_ias_zone_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
@@ -175,6 +179,7 @@ static void coordinator_register_endpoint(void)
     ezb_af_device_desc_register(dev_desc);
 }
 
+// Обработчик сообщзений от Zigbee
 static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
 {
     ezb_app_signal_type_t signal_type = ezb_app_signal_get_type(app_signal);
@@ -229,7 +234,7 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
         }
         break;
 
-    case EZB_ZDO_SIGNAL_DEVICE_ANNCE:
+    case EZB_ZDO_SIGNAL_DEVICE_ANNCE: // после отладки удалить
     {
         uint16_t short_addr = signal_params.dev_annce->short_addr;
         ezb_extaddr_t ieee_addr = {0};
@@ -239,7 +244,7 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
         break;
     }
 
-    case EZB_ZDO_SIGNAL_DEVICE_AUTHORIZED:
+    case EZB_ZDO_SIGNAL_DEVICE_AUTHORIZED: // после отладки удалить
         ESP_LOGI(TAG, "Device authorized: short=0x%04x, status=%d, type=%d",
                  signal_params.dev_auth->short_addr,
                  signal_params.dev_auth->status,
@@ -248,12 +253,17 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
 
     case EZB_ZDO_SIGNAL_LEAVE_INDICATION:
     {
+        // Когда пользователь нажимает кнопку сброса на датчике и тот сам уходит из сети,
+        // это событие часто приходит не в виде ZCL/ZDO-пакета в bridge_aps_data_ind_cb,
+        // а именно как сетевой сигнал LEAVE_INDICATION.
+        // Надо отправить команду на удаление
         uint16_t short_addr = signal_params.leave_ind->short_addr;
         ESP_LOGI(TAG, "Device Left: short=0x%04x", short_addr);
         break;
     }
 
     case EZB_NWK_SIGNAL_PERMIT_JOIN_STATUS:
+        // TODO: отправить сообщение в приложение о статусе
         ESP_LOGI(TAG, "Permit Join status: %u sec", signal_params.permit_join->duration);
         break;
 
