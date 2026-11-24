@@ -73,15 +73,15 @@ static void znp_handle_command(uint16_t cmd_id, const uint8_t *payload, uint8_t 
 
             if (addr_mode == 0x03 && len >= 23)
             {
-                 memcpy(&bind_req.field.dst_addr, payload + 14, 8);
+                memcpy(&bind_req.field.dst_addr, payload + 14, 8);
                 bind_req.field.dst_ep = *(payload + 22);
                 status = 0x00;
             }
             else if (addr_mode == 0x01 && len >= 16)
             {
-            bind_req.field.dst_addr.group_addr.group =
-                (uint16_t)(*(payload + 14)) | ((uint16_t)(*(payload + 15)) << 8);
-            status = 0x00;
+                bind_req.field.dst_addr.group_addr.group =
+                    (uint16_t)(*(payload + 14)) | ((uint16_t)(*(payload + 15)) << 8);
+                status = 0x00;
             }
 
             if (status == 0x00)
@@ -154,9 +154,19 @@ static void znp_handle_command(uint16_t cmd_id, const uint8_t *payload, uint8_t 
         break;
     }
 
-    case 0x2401: // AF_DATA_REQUEST -> SRSP 0x6401 (+ AREQ 0x4480 из bridge_aps_data_cnf_cb)
+    case AF_DATA_REQUEST: // 0x2401:  -> SRSP 0x6401 (+ AREQ 0x4480 из bridge_aps_data_cnf_cb)
     {
         uint8_t status = 0x02;
+
+        if (payload != NULL && len > 0)
+        {
+            printf("AF_DATA_REQUEST:: ");
+            for (uint8_t i = 0; i < len; i++)
+            {
+                printf("%02X ", payload[i]);
+            }
+            printf("\n");
+        }
 
         if (len >= 10)
         {
@@ -166,30 +176,27 @@ static void znp_handle_command(uint16_t cmd_id, const uint8_t *payload, uint8_t 
             uint16_t cluster_id = (uint16_t)(*(payload + 4)) | ((uint16_t)(*(payload + 5)) << 8);
             uint8_t trans_id = *(payload + 6);
             uint8_t radius = *(payload + 8);
-            uint8_t data_len = *(payload + 9);
+            uint8_t  data_len   = (uint8_t)(len - 10); // в Go 9-й байт содержит полную длину payload, поэтому длина ZCL = len - 10
 
-            if (len >= (uint16_t)(10 + data_len))
-            {
-                last_af_trans_id = trans_id;
+            last_af_trans_id = trans_id;
 
-                ezb_apsde_data_req_t req = {0};
-                req.dst_address.addr_mode = EZB_ADDR_MODE_SHORT;
-                req.dst_address.u.short_addr = dst_addr;
-                req.dst_endpoint = dst_ep;
-                req.src_endpoint = src_ep;
-                req.profile_id = 0x0104; // Home Automation
-                req.cluster_id = cluster_id;
-                req.asdu_length = data_len;
-                req.asdu = (data_len > 0) ? (uint8_t *)(payload + 10) : NULL;
-                req.radius = radius;
-                req.tx_options = EZB_APSDE_TX_OPT_ACK_TX;
+            ezb_apsde_data_req_t req = {0};
+            req.dst_address.addr_mode = EZB_ADDR_MODE_SHORT;
+            req.dst_address.u.short_addr = dst_addr;
+            req.dst_endpoint = dst_ep;
+            req.src_endpoint = src_ep;
+            req.profile_id = 0x0104; // Home Automation
+            req.cluster_id = cluster_id;
+            req.asdu_length = data_len;
+            req.asdu = (data_len > 0) ? (uint8_t *)(payload + 10) : NULL;
+            req.radius = radius;
+            req.tx_options = EZB_APSDE_TX_OPT_ACK_TX;
 
-                esp_zigbee_lock_acquire(portMAX_DELAY);
-                esp_err_t err = ezb_apsde_data_request(&req);
-                esp_zigbee_lock_release();
+            esp_zigbee_lock_acquire(portMAX_DELAY);
+            esp_err_t err = ezb_apsde_data_request(&req);
+            esp_zigbee_lock_release();
 
-                status = (err == ESP_OK) ? 0x00 : 0x01;
-            }
+            status = (err == ESP_OK) ? 0x00 : 0x01;
         }
 
         bridge_enqueue_to_pc(0x6401, &status, 1);
@@ -198,9 +205,13 @@ static void znp_handle_command(uint16_t cmd_id, const uint8_t *payload, uint8_t 
 
     default:
         ESP_LOGW(TAG, "Unhandled command: 0x%04X", cmd_id);
-        for (uint8_t i = 0; i < len; i++)
+        if (payload != NULL && len > 0)
         {
-            ESP_LOGI(TAG, "%02X ", payload[i]);
+            for (uint8_t i = 0; i < len; i++)
+            {
+                printf("%02X ", payload[i]);
+            }
+            printf("\n");
         }
         break;
     }

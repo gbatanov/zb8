@@ -3,13 +3,6 @@
 ## MAC
 74:4d:bd:ff:fe:63:71:47
 
-Для сети на 60–100 устройств оптимально не усложнять систему и оставить сетевой стек на ESP32-H2, а всю бизнес-логику перенести на Linux ПК:
-• На ESP32-H2: Соберите прошивку на базе ESP-Zigbee-SDK v2.x (взяв за основу all_device_types_app в роли координатора с увеличенными таблицами network_size и NVS). Напишите на C простую прослойку, которая принимает ZCL-отчеты от датчиков, упаковывает их в бинарные фреймы (или JSON) и отправляет в USB Serial/JTAG, а в обратную сторону принимает команды на управление реле и разрешением сопряжения (permit_join).
-• На Linux (на Go или C): Напишите демон, который читает /dev/ttyACM0, хранит в базе данных (например, SQLite или PostgreSQL) человекочитаемые имена устройств, их состояния, привязки (Bindings) и правила автоматизации.
-Такой подход избавит вас от необходимости разбирать сложный проприетарный протокол ZNSP из старой ветки SDK, даст доступ к актуальному стеку Zigbee от Espressif и обеспечит легкое масштабирование вашей сети до 100–120 устройств в будущем.
-
-
-
 ## Правила добавления кластеров для координатора
 
 • Роль Client (Клиент). Для всех кластеров, от которых координатор принимает данные или которыми управляет (температура, влажность, реле, диммеры, энергомониторинг, кнопки), указывается роль EZB_ZCL_CLUSTER_CLIENT.
@@ -34,89 +27,13 @@ factory,     app,  factory, 0x10000, 1M,
 zb_storage,  data, nvs,     0x110000, 0x10000,
 ```
 
-
-## Минимальный каркас обмена с Linux по USB (COBS + Бинарные фреймы)
-
-Поскольку встроенный USB Serial/JTAG на ESP32-H2 работает как виртуальный COM-порт (/dev/ttyACM0 в Linux), проще всего обмениваться компактными бинарными пакетами, разделенными нулевым байтом 0x00 (кодирование COBS), или текстовыми строками JSON (NDJSON) для быстрого прототипирования.
-Важно: в idf.py menuconfig отключите вывод системных логов ESP-IDF в USB (Component config -> ESP System Settings -> Channel for console output -> None или выведите логи на физический UART0), чтобы отладочные сообщения не перемешивались с вашим протоколом.
-
-### Сторона ESP32-H2 (C, ESP-IDF)
-
-Настраиваем драйвер usb_serial_jtag и пересылаем входящие ZCL-отчеты (EZB_ZCL_CORE_REPORT_ATTR_CB_ID) в USB:  
-(to_comp.c)
-
-
-### Сторона Go
-```
-package main
-
-import (
-	"encoding/binary"
-	"fmt"
-	"io"
-	"log"
-
-	"go.bug.st/serial"
-)
-
-type HostFrame struct {
-	SOF       uint8
-	Cmd       uint8
-	ShortAddr uint16
-	Endpoint  uint8
-	ClusterID uint16
-	AttrID    uint16
-	DataType  uint8
-	Len       uint8
-	Payload   [32]byte
-}
-
-func main() {
-	mode := &serial.Mode{BaudRate: 115200}
-	port, err := serial.Open("/dev/ttyACM0", mode)
-	if err != nil {
-		log.Fatalf("Ошибка открытия порта: %v", err)
-	}
-	defer port.Close()
-
-	// Отправляем команду Permit Join на 60 секунд
-	_, err = port.Write([]byte{0xAA, 0x10, 60})
-	if err != nil {
-		log.Printf("Ошибка записи: %v", err)
-	}
-
-	// Читаем входящие события от ESP32-H2
-	for {
-		var frame HostFrame
-		err := binary.Read(port, binary.LittleEndian, &frame)
-		if err != nil {
-			if err == io.EOF {
-				continue
-			}
-			log.Fatalf("Ошибка чтения фрейма: %v", err)
-		}
-
-		if frame.SOF != 0xAA {
-			// В боевом коде здесь нужен поиск байта 0xAA или декодер COBS
-			continue
-		}
-
-		fmt.Printf("Устройство: 0x%04X (EP %d) | Кластер: 0x%04X | Атрибут: 0x%04X | Данные: %x\n",
-			frame.ShortAddr, frame.Endpoint, frame.ClusterID, frame.AttrID, frame.Payload[:frame.Len])
-	}
-}
-```
-
-
-На отладочных платах с ESP32-H2 (например, ESP32-H2-DevKitM-1) эти два разъема подключены к разным аппаратным интерфейсам чипа и имеют четкое разделение:
-
 ## Назначение двух USB-портов на плате
 
-
+На отладочных платах с ESP32-H2 (например, ESP32-H2-DevKitM-1) эти два разъема подключены к разным аппаратным интерфейсам чипа и имеют четкое разделение:
 Разъем на плате	Куда подключен аппаратно	Как определяется в Linux	Назначение
-USB
+### USB
 	Напрямую к встроенному в ESP32-H2 контроллеру USB Serial/JTAG (пины GPIO26 и GPIO27).	/dev/ttyACM0	Встроенный аппаратный JTAG (для отладки GDB) + виртуальный COM-порт (CDC) для данных или прошивки.
-UART
+### UART
 	К внешнему мосту USB-UART на плате (например, CP2102 или CH343), который идет на пины UART0 (TX/RX).	/dev/ttyUSB0	Классический последовательный порт для вывода системных логов, загрузчика и прошивки.
 
 
@@ -134,29 +51,6 @@ UART
 	• В том же разделе найдите пункт Channel for console secondary output.
 	• Выберите No secondary console.
 
-### 2. Инициализация порта USB для данных в коде (C)
-
-Поскольку системная консоль теперь привязана к UART0, драйвер USB Serial/JTAG (/dev/ttyACM0) полностью свободен для вашей программы. Вы инициализируете его в коде и используете исключительно для обмена фреймами с Linux:
-```
-#include "driver/usb_serial_jtag.h"
-#include "esp_log.h"
-
-static const char *TAG = "ZB_GW";
-
-void init_interfaces(void) {
-    // 1. Этот лог уйдет строго в порт UART (/dev/ttyUSB0)
-    ESP_LOGI(TAG, "Инициализация транспорта USB Serial/JTAG...");
-
-    // 2. Настраиваем порт USB (/dev/ttyACM0) под бинарный протокол
-    usb_serial_jtag_driver_config_t usb_cfg = {
-        .rx_buffer_size = 2048,
-        .tx_buffer_size = 2048,
-    };
-    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usb_cfg));
-
-    ESP_LOGI(TAG, "USB порт готов к обмену данными с хостом");
-}
-```
 
 ### Важная особенность работы usb_serial_jtag при отключенном кабеле
 
@@ -237,29 +131,8 @@ AF_INCOMING_MSG
 
 
 
-## Таблица команд универсального моста (CMD)
-
-Чтобы поддерживать любые Zigbee-устройства без перепрошивки ESP32-H2, достаточно 7 базовых команд:
-
-Код (CMD)	Направление	Название	Структура PAYLOAD
-0x01
-	ПК → ESP	PERMIT_JOIN	[duration_sec (1B)] (0 = закрыть сеть, 1..254 = открыть)
-0x02
-	ESP → ПК	DEV_ANNOUNCE	[short_addr (2B)] [ieee_addr (8B)] [capability (1B)] (Новое устройство вошло в сеть)
-0x03
-	ESP → ПК	DEV_LEAVE	[short_addr (2B)] [ieee_addr (8B)] (Устройство покинуло сеть)
-0x10
-	ПК \(\leftrightarrow \) ESP	ZDO_RAW_REQ / RSP	[dst_short (2B)] [zdo_cluster (2B)] [zdo_payload...] (Active EP, Simple Desc, Bind/Unbind — для интервью на ПК)
-0x20
-	ПК → ESP	ZCL_SEND_RAW	[dst_short (2B)] [src_ep (1B)] [dst_ep (1B)] [cluster_id (2B)] [manuf_code (2B)] [zcl_fc (1B)] [zcl_cmd (1B)] [zcl_payload...]
-0x21
-	ESP → ПК	ZCL_RECV_RAW	[src_short (2B)] [src_ep (1B)] [dst_ep (1B)] [cluster_id (2B)] [manuf_code (2B)] [rssi (1B)] [lqi (1B)] [zcl_fc (1B)] [zcl_cmd (1B)] [zcl_payload...]
-0xF0
-	ПК \(\leftrightarrow \) ESP	PING / STATUS	[uptime_sec (4B)] [pan_id (2B)] [channel (1B)] (Проверка живости моста)
-
-Зачем manuf_code (2 байта)? У Aqara (Lumi = 0x115F), Tuya, Bosch и др. есть проприетарные атрибуты и команды. Передавая manuf_code в каждом пакете (0x0000 для стандартных кластеров ZCL), ваш ПК сможет управлять абсолютно любым устройством.
-
-
+## Зачем manuf_code (2 байта)
+ У Aqara (Lumi = 0x115F), Tuya, Bosch и др. есть проприетарные атрибуты и команды. Передавая manuf_code в каждом пакете (0x0000 для стандартных кластеров ZCL), ваш ПК сможет управлять абсолютно любым устройством.
 
 ## Перехват всех входящих пакетов на ESP32-H2 (ESP-Zigbee-SDK)
 
@@ -269,33 +142,24 @@ AF_INCOMING_MSG
 // Регистрация перехватчика всех сырых ZCL-фреймов при инициализации координатора
 esp_zb_raw_command_handler_register(zb_raw_zcl_handler);
 ```
-
-
 ## Архитектура очередей (Чтобы радио и UART не тормозили друг друга)
 
 Если отправлять пакет в UART прямо внутри zb_raw_zcl_handler и ждать там ACK от ПК (150 мс), Zigbee-стек встанет на паузу и пропустит пакеты от других устройств. Поэтому на ESP32-H2 нужно сделать две очереди FreeRTOS:
 1. uart_tx_queue (Очередь на ПК): zb_raw_zcl_handler мгновенно кладет пакет в эту очередь (за 5 микросекунд) и возвращается в радио-стек. Отдельная задача proto_tx_task берет пакеты из очереди по одному, присваивает SEQ, отправляет в UART и ждет ACK (с ретрансляцией при потере).
 2. zb_cmd_queue (Очередь с ПК в радио): Когда proto_rx_task получает от ПК валидный пакет с новым SEQ, она сразу шлет ACK в UART, кладет команду в zb_cmd_queue и вызывает esp_zb_scheduler_alarm(), чтобы Zigbee-задача забрала команду и отправила её в эфир через esp_zb_zcl_custom_cluster_cmd_req().
 
-## Настройка разделения UART и JTAG на ESP32-H2
-
-В menuconfig (idf.py menuconfig):
-• Component config -> ESP System Settings -> Channel for console output → выбрать USB Serial/JTAG Controller.
-• А для нашего протокола инициализировать UART1 (назначив любые удобные пины TX/RX, например GPIO 4 и GPIO 5) на скорость 921600 бод.
-Подскажите, на каком языке написана ваша программа на ПК (C#, Python, C++, Go и т.д.) и используете ли вы уже готовую библиотеку для ZCL/ZDO на стороне ПК, чтобы я мог подготовить зеркальный класс драйвера связи с обработкой SEQ, ретрансляцией и сборкой ZCL-кадров?
-
-
-Совет по скорости: 921600 бод отлично работает на чипах CP2102N / CH343 / FT232. Если на плате стоит старая ревизия CP2102 (без буквы N) или CH340G с длинным проводом, и появятся ошибки CRC — смело снижайте PROTO_UART_BAUD до 460800 или 115200. Для Zigbee (у которого скорость в эфире всего 250 кбит/с) даже 115200 хватает с запасом.
-
-
-Три важные детали при сборке и запуске:
+## Три важные детали при сборке и запуске:
 
 1. Поведение при рестарте Go-программы (is_first_rx_packet):
 Обрати внимание на флаг is_first_rx_packet. Если ты перезапустишь программу на ПК, её счетчик tx_seq снова начнется с 1. Если в этот момент last_rx_seq на ESP32 тоже был равен 1, без этого флага первый пакет после перезапуска отбросился бы как дубликат. Рекомендую со стороны Go при старте первым делом отправлять CMD_SYS_PING (0xF0) с новым SEQ — он гарантированно обновит last_rx_seq на ESP32 и проверит связь.
 2. Биндинг устройств (ZDO Bind Request):
-Многие устройства (особенно датчики температуры/влажности, кнопки Aqara, умные розетки с энергомониторингом) не шлют отчеты координатору сами, пока ПК не выполнит им Bind на нужный кластер. Если нужно — в CMD_ZDO_REQ легко добавить ветку для zdo_cluster == 0x0021 (esp_zb_zdo_device_bind_req), передавая с ПК [src_ieee (8B)][src_ep (1B)][cluster (2B)][dst_ieee (8B)][dst_ep (1B)].
+Многие устройства (особенно датчики температуры/влажности, кнопки Aqara, умные розетки с энергомониторингом) не шлют отчеты координатору сами, пока ПК не выполнит им Bind на нужный кластер. 
 
+```
 stty -f /dev/cu.usbmodem14801 921600 cs8 -cstopb -parenb raw
 xxd -g 1 /dev/cu.usbmodem14801
+```
 
+```
 get_idf
+```

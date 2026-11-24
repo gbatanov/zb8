@@ -51,6 +51,7 @@
 #define SYS_RESET_REQ 0x4100
 #define SYS_PING 0x2101
 #define AF_DATA_CONFIRM 0x4480
+#define AF_DATA_REQUEST 0x2401 
 
 typedef enum
 {

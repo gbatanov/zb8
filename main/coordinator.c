@@ -121,7 +121,7 @@ static bool bridge_aps_data_ind_cb(const ezb_apsde_data_ind_t *ind)
 
 static void bridge_aps_data_cnf_cb(const ezb_apsde_data_confirm_t *confirm)
 {
-   if (!confirm)
+    if (!confirm)
         return;
 
     // В TI ZNP AF_DATA_CONFIRM (0x4480) отправляется только для прикладных эндпоинтов (1..240), не для ZDO (0)
@@ -129,9 +129,9 @@ static void bridge_aps_data_cnf_cb(const ezb_apsde_data_confirm_t *confirm)
         return;
 
     uint8_t out[3];
-    out[0] = (uint8_t)confirm->status;   // Status (0x00 = Success)
-    out[1] = confirm->src_endpoint;      // Endpoint
-    out[2] = last_af_trans_id;           // TransID
+    out[0] = (uint8_t)confirm->status; // Status (0x00 = Success)
+    out[1] = confirm->src_endpoint;    // Endpoint
+    out[2] = last_af_trans_id;         // TransID
 
     bridge_enqueue_to_pc(0x4480, out, sizeof(out));
 }
@@ -164,6 +164,13 @@ static void coordinator_register_endpoint(void)
     };
 
     ezb_af_ep_desc_t ep_desc = ezb_af_create_gateway_endpoint(&ep_cfg);
+
+    // Добавляем клиентские кластеры для приёма отчётов и команд от датчиков/кнопок
+    ezb_af_endpoint_add_cluster_desc(ep_desc, ezb_zcl_power_config_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep_desc, ezb_zcl_on_off_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep_desc, ezb_zcl_ias_zone_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep_desc, ezb_zcl_level_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
+    ezb_af_endpoint_add_cluster_desc(ep_desc, ezb_zcl_occupancy_sensing_create_cluster_desc(NULL, EZB_ZCL_CLUSTER_CLIENT));
     ezb_af_device_add_endpoint_desc(dev_desc, ep_desc);
     ezb_af_device_desc_register(dev_desc);
 }
@@ -229,14 +236,6 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
         ezb_address_extended_by_short(short_addr, &ieee_addr);
 
         ESP_LOGI(TAG, "Device Announce: short=0x%04x, ieee=0x%016" PRIx64, short_addr, ieee_addr.u64);
-        /*
-                uint8_t buf[11];
-                buf[0] = (uint8_t)(short_addr & 0xFF);
-                buf[1] = (uint8_t)((short_addr >> 8) & 0xFF);
-                memcpy(&buf[2], ieee_addr.u8, 8);
-                buf[10] = signal_params.dev_annce->capability;
-                bridge_enqueue_to_pc(CMD_DEV_ANNOUNCE, buf, sizeof(buf));
-                */
         break;
     }
 
@@ -251,13 +250,6 @@ static bool zb_app_signal_handler(const ezb_app_signal_t *app_signal)
     {
         uint16_t short_addr = signal_params.leave_ind->short_addr;
         ESP_LOGI(TAG, "Device Left: short=0x%04x", short_addr);
-        /*
-                uint8_t buf[10];
-                buf[0] = (uint8_t)(short_addr & 0xFF);
-                buf[1] = (uint8_t)((short_addr >> 8) & 0xFF);
-                memcpy(&buf[2], signal_params.leave_ind->device_addr.u8, 8);
-                bridge_enqueue_to_pc(CMD_DEV_LEAVE, buf, sizeof(buf));
-                */
         break;
     }
 
@@ -291,13 +283,38 @@ void esp_zb_task(void *pvParameters)
 
     esp_zigbee_init(&zb_cfg);
 
+    ESP_ERROR_CHECK(ezb_bdb_set_primary_channel_set(ZB_CHANNELS_MASK));
+    ESP_ERROR_CHECK(ezb_bdb_set_secondary_channel_set(0));
+    /* Set default allowed network channels */
+    ESP_ERROR_CHECK(ezb_set_channel_mask(ZB_CHANNELS_MASK));
+
+    static const uint8_t zigbee_alliance09_key[16] = {
+        0x5A, 0x69, 0x67, 0x42, 0x65, 0x65, 0x41, 0x6C,
+        0x6C, 0x69, 0x61, 0x6E, 0x63, 0x65, 0x30, 0x39};
+    ezb_secur_set_global_link_key(zigbee_alliance09_key);
+
+    ezb_bdb_set_router_rejoin_required(true);
+    ezb_secur_set_kn_method_enabled(EZB_SECUR_KN_METHOD_STATIC_REQUEST_KEY, true);
+    // ezb_secur_set_tclk_exchange_required(true);
+    //  Отключаем принудительный кик по 15-секундному таймеру BDB
+    ezb_secur_set_tclk_exchange_required(false);
+
+    ezb_secur_tcpol_set_allow_rejoins_with_well_known_key(true);
+    ezb_secur_set_kn_method_enabled(EZB_SECUR_KN_METHOD_ECSPEKE_CURVE25519_AESMMO, true);
+    ezb_secur_set_kn_method_enabled(EZB_SECUR_KN_METHOD_ECSPEKE_CURVE25519_SHA256, true);
+
+    // Set default network type
+    ezb_aps_secur_enable_distributed_security(true);
+    ezb_af_node_desc_set_manuf_code(0x115F); // TODO: делать только для Aqara
+
+    // Регистрация обработчика всех входящих ZCL-событий и ответов
+    setup_coord_trust_center_addr();
+
     ezb_app_signal_add_handler(zb_app_signal_handler);
     coordinator_register_endpoint();
 
     ezb_apsde_data_indication_handler_register(bridge_aps_data_ind_cb);
     ezb_apsde_data_confirm_handler_register(bridge_aps_data_cnf_cb);
-
-    ezb_set_channel_mask(ZB_CHANNELS_MASK);
 
     ESP_ERROR_CHECK(esp_zigbee_start(false));
     esp_zigbee_launch_mainloop();
